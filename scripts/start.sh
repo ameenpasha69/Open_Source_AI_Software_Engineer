@@ -10,5 +10,7 @@ if command -v ollama >/dev/null 2>&1 && ! curl -s -o /dev/null http://localhost:
 fi
 
 source .venv/bin/activate
-cd backend
-uvicorn app.main:app --reload --port 8000
+# Run from the project root (not backend/) so relative paths like DATA_DIR
+# resolve consistently with what's documented in the README. --app-dir tells
+# uvicorn where to find the `app` package without changing the process cwd.
+uvicorn app.main:app --reload --port 8000 --app-dir backend

@@ -29,6 +29,19 @@ class Settings(BaseSettings):
 
     max_agent_iterations: int = 8
 
+    # --- Indexing / chunking ---
+    # Max lines per chunk before the generic sliding-window chunker splits further
+    # (also applies to oversized Python functions/classes). Tune this for retrieval
+    # quality experiments — smaller chunks are more precise, larger ones carry more context.
+    chunk_max_lines: int = 200
+    chunk_overlap_lines: int = 20
+    # Files larger than this are skipped entirely (binary blobs, generated assets, etc.)
+    max_indexable_file_size_bytes: int = 1_000_000
+
+    @property
+    def database_url(self) -> str:
+        return f"sqlite:///{self.data_dir / 'app.db'}"
+
 
 @lru_cache
 def get_settings() -> Settings:
