@@ -22,6 +22,13 @@ class IndexRepositoryRequest(BaseModel):
     name: str | None = None
 
 
+class EmbeddingSyncResult(BaseModel):
+    chunks_embedded: int
+    chunks_removed: int
+    duration_seconds: float
+    error: str | None = None
+
+
 class IndexRunResult(BaseModel):
     index_run_id: str
     repository_id: str
@@ -34,6 +41,7 @@ class IndexRunResult(BaseModel):
     chunks_created: int
     duration_seconds: float
     error: str | None = None
+    embedding: EmbeddingSyncResult | None = None
 
 
 class RepositorySummary(BaseModel):
@@ -44,3 +52,4 @@ class RepositorySummary(BaseModel):
     last_indexed_at: datetime.datetime | None
     indexed_file_count: int
     chunk_count: int
+    embedded_chunk_count: int

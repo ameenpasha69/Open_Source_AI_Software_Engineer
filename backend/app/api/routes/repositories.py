@@ -5,8 +5,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config.settings import Settings, get_settings
-from app.database.models import CodeChunk, IndexedFile, Repository
+from app.database.models import CodeChunk, IndexedFile, Repository, VectorRecord
 from app.database.session import get_db_session
+from app.embeddings.base import EmbeddingProvider
+from app.embeddings.factory import get_embedding_provider
+from app.retrieval.embedding_pipeline import EmbeddingPipeline
 from app.retrieval.indexer import RepositoryIndexer, RepositoryNotFoundError
 from app.schemas.indexing import IndexRepositoryRequest, IndexRunResult, RepositorySummary
 
@@ -18,6 +21,7 @@ async def index_repository(
     request: IndexRepositoryRequest,
     session: Session = Depends(get_db_session),
     settings: Settings = Depends(get_settings),
+    embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
 ) -> IndexRunResult:
     indexer = RepositoryIndexer(
         session=session,
@@ -26,9 +30,20 @@ async def index_repository(
         max_file_size_bytes=settings.max_indexable_file_size_bytes,
     )
     try:
-        return indexer.index(Path(request.path), name=request.name)
+        result = indexer.index(Path(request.path), name=request.name)
     except RepositoryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    if result.status == "completed":
+        pipeline = EmbeddingPipeline(
+            session=session, embedding_provider=embedding_provider, vector_index_dir=settings.vector_index_dir
+        )
+        # Chunking already succeeded and is persisted regardless of what happens
+        # here — an unreachable embedding backend degrades search, it doesn't
+        # lose indexing work.
+        result.embedding = await pipeline.sync(result.repository_id)
+
+    return result
 
 
 @router.get("/repositories", response_model=list[RepositorySummary])
@@ -54,6 +69,9 @@ def _to_summary(session: Session, repository: Repository) -> RepositorySummary:
     chunk_count = session.scalar(
         select(func.count()).select_from(CodeChunk).where(CodeChunk.repository_id == repository.id)
     )
+    embedded_count = session.scalar(
+        select(func.count()).select_from(VectorRecord).where(VectorRecord.repository_id == repository.id)
+    )
     return RepositorySummary(
         id=repository.id,
         name=repository.name,
@@ -62,4 +80,5 @@ def _to_summary(session: Session, repository: Repository) -> RepositorySummary:
         last_indexed_at=repository.last_indexed_at,
         indexed_file_count=file_count or 0,
         chunk_count=chunk_count or 0,
+        embedded_chunk_count=embedded_count or 0,
     )

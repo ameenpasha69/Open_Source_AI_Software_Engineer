@@ -83,3 +83,20 @@ class CodeChunk(Base):
     content: Mapped[str] = mapped_column(Text)
 
     file: Mapped[IndexedFile] = relationship(back_populates="chunks")
+
+
+class VectorRecord(Base):
+    """Maps a CodeChunk to its integer id inside a repository's FAISS index
+    (FAISS requires int64 ids; chunk ids are uuid4 hex strings). Existence of
+    a row here is also how the embedding pipeline knows a chunk has already
+    been embedded, so unchanged chunks are never re-embedded.
+    """
+
+    __tablename__ = "vector_records"
+    __table_args__ = (Index("ix_vector_records_repository_id", "repository_id"),)
+
+    faiss_id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    chunk_id: Mapped[str] = mapped_column(
+        ForeignKey("code_chunks.id"), unique=True
+    )
+    repository_id: Mapped[str] = mapped_column(ForeignKey("repositories.id"))

@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     def database_url(self) -> str:
         return f"sqlite:///{self.data_dir / 'app.db'}"
 
+    @property
+    def vector_index_dir(self) -> Path:
+        return self.data_dir / "vector_indexes"
+
 
 @lru_cache
 def get_settings() -> Settings:

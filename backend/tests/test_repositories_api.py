@@ -1,13 +1,16 @@
 import pytest
+from app.config.settings import Settings, get_settings
 from app.database.session import create_sqlite_engine, get_db_session, get_session_factory
+from app.embeddings.factory import get_embedding_provider
 from app.main import app
 from httpx import ASGITransport, AsyncClient
 
 
 @pytest.fixture
-def client(tmp_path):
+def client(tmp_path, fake_embedding_provider):
     engine = create_sqlite_engine(f"sqlite:///{tmp_path / 'test.db'}")
     session_factory = get_session_factory(engine)
+    test_settings = Settings(_env_file=None, data_dir=tmp_path / "data")
 
     def override_get_db_session():
         session = session_factory()
@@ -17,6 +20,8 @@ def client(tmp_path):
             session.close()
 
     app.dependency_overrides[get_db_session] = override_get_db_session
+    app.dependency_overrides[get_embedding_provider] = lambda: fake_embedding_provider
+    app.dependency_overrides[get_settings] = lambda: test_settings
     yield ASGITransport(app=app)
     app.dependency_overrides.clear()
 
@@ -38,6 +43,8 @@ async def test_index_repository_endpoint(client, sample_repo):
     assert body["status"] == "completed"
     assert body["files_indexed"] == 1
     assert body["chunks_created"] >= 1
+    assert body["embedding"]["chunks_embedded"] == body["chunks_created"]
+    assert body["embedding"]["error"] is None
 
 
 async def test_index_missing_path_returns_404(client, tmp_path):
@@ -58,6 +65,7 @@ async def test_list_and_get_repository(client, sample_repo):
         assert list_resp.status_code == 200
         assert len(list_resp.json()) == 1
         assert list_resp.json()[0]["indexed_file_count"] == 1
+        assert list_resp.json()[0]["embedded_chunk_count"] == list_resp.json()[0]["chunk_count"]
 
         get_resp = await http.get(f"/api/repositories/{repository_id}")
         assert get_resp.status_code == 200

@@ -1,4 +1,7 @@
+import hashlib
+
 import pytest
+from app.embeddings.base import EmbeddingProvider
 from app.llm.base import LLMProvider, LLMResponse, Message
 
 
@@ -32,3 +35,38 @@ class FakeLLMProvider(LLMProvider):
 @pytest.fixture
 def fake_llm_provider() -> FakeLLMProvider:
     return FakeLLMProvider()
+
+
+class FakeEmbeddingProvider(EmbeddingProvider):
+    """Deterministic in-memory EmbeddingProvider for tests — no network, no
+    Ollama. Uses hashed bag-of-words so texts sharing words end up with
+    higher cosine similarity, which is enough for tests that assert on
+    search *ordering* without needing a real embedding model."""
+
+    def __init__(self, dimension: int = 32, reachable: bool = True):
+        self._dimension = dimension
+        self._reachable = reachable
+        self.embedded_texts: list[str] = []
+
+    async def embed_text(self, text: str) -> list[float]:
+        return (await self.embed_documents([text]))[0]
+
+    async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.embedded_texts.extend(texts)
+        return [self._hash_embed(t) for t in texts]
+
+    async def health_check(self) -> bool:
+        return self._reachable
+
+    def _hash_embed(self, text: str) -> list[float]:
+        vector = [0.0] * self._dimension
+        for word in text.lower().split():
+            digest = hashlib.sha256(word.encode("utf-8")).digest()
+            idx = int.from_bytes(digest[:4], "big") % self._dimension
+            vector[idx] += 1.0
+        return vector
+
+
+@pytest.fixture
+def fake_embedding_provider() -> FakeEmbeddingProvider:
+    return FakeEmbeddingProvider()

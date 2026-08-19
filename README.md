@@ -15,6 +15,7 @@ This project is being built incrementally, one milestone at a time (see
 
 - ✅ **Milestone 1** — Local LLM provider abstraction (Ollama backend) + FastAPI health endpoint
 - ✅ **Milestone 2** — Repository indexing + language-aware chunking
+- ✅ **Milestone 3** — Local embeddings + FAISS vector search
 
 Everything below this line describes what exists *today*, not the end goal.
 The full architecture (agent loop, retrieval, tool system, evaluation
@@ -63,9 +64,9 @@ repository, file_path, language, chunk_id, start_line, end_line, symbol, content
 
 Re-indexing is incremental: each file's SHA-256 hash is compared against the
 last indexed hash, and unchanged files are skipped entirely — no re-parse, no
-re-chunk. This is also what will let Milestone 3 skip re-embedding unchanged
-chunks. Files deleted from disk since the last run have their chunks removed
-so the index stays accurate.
+re-chunk. This is also what lets embedding sync (below) skip re-embedding
+unchanged chunks. Files deleted from disk since the last run have their
+chunks removed so the index stays accurate.
 
 ```bash
 curl -X POST http://localhost:8000/api/repositories/index \
@@ -73,6 +74,46 @@ curl -X POST http://localhost:8000/api/repositories/index \
   -d '{"path": "/absolute/path/to/a/repo"}'
 
 curl http://localhost:8000/api/repositories
+```
+
+## Embeddings and vector search
+
+`POST /api/repositories/index` also embeds every chunk that doesn't have a
+vector yet (`app/retrieval/embedding_pipeline.py`) and stores the vectors in
+a per-repository FAISS index (`data/vector_indexes/{repository_id}.faiss`,
+inner product over L2-normalized vectors — i.e. cosine similarity):
+
+```json
+{
+  "chunks_created": 229,
+  "embedding": { "chunks_embedded": 229, "chunks_removed": 0, "duration_seconds": 2.46, "error": null }
+}
+```
+
+**Reconciliation, not blind re-embedding**: a `VectorRecord` row is the
+source of truth for "this chunk is embedded." On re-index, only chunks
+without a `VectorRecord` get embedded (new or changed files — an unchanged
+file's chunks keep their ids, so they're skipped); `VectorRecord`s whose
+chunk no longer exists (file changed or deleted) are removed from the FAISS
+index. A repository with no changes triggers zero calls to the embedding
+model.
+
+**Degrades gracefully**: chunking is persisted to SQLite regardless of
+whether the embedding backend is reachable. If Ollama's embedding model isn't
+pulled or the server is down, indexing still succeeds and the response's
+`embedding.error` reports what went wrong — you don't lose the chunking work.
+
+`EmbeddingPipeline.search(repository_id, query_text, top_k)` embeds the query
+and returns ranked chunks — this is the retrieval engine; `POST /api/search`
+(Milestone 4) will be the HTTP surface for it, plus source-location
+formatting and optional reranking. Verified live against this repository's
+own `backend/`:
+
+```text
+query: "walk a repository and split files into chunks"
+  0.730  app/retrieval/indexer.py:19-20
+  0.680  app/retrieval/file_walker.py:68-91  walk_repository
+  0.661  app/retrieval/chunker.py:14-24      Chunker
 ```
 
 ## Hardware / model defaults
@@ -154,10 +195,11 @@ backend/
     config/      # environment-driven settings
     llm/         # LLMProvider abstraction + Ollama backend
     database/    # SQLAlchemy models + session management (SQLite)
-    retrieval/   # repository walker + chunker (embedding/search: Milestone 3+)
+    embeddings/  # EmbeddingProvider abstraction + Ollama backend
+    retrieval/   # repository walker, chunker, FAISS vector store, embedding pipeline
     api/routes/  # FastAPI routers
     schemas/     # Pydantic request/response models
-    agents/ embeddings/ tools/ execution/
+    agents/ tools/ execution/
     verification/ evaluation/ models/   # scaffolded, empty — future milestones
   tests/
 scripts/         # setup.sh, start.sh
@@ -168,10 +210,17 @@ docs/
 
 ## Limitations (current milestone)
 
-- Only Ollama is implemented as a provider; the interface supports others but
-  none are built yet.
-- No agent, embedding, vector search, or tool system exists yet — chunks are
-  persisted as structured metadata + text, not yet embedded or searchable.
+- Only Ollama is implemented as an LLM/embedding provider; the interfaces
+  support others but none are built yet.
+- No agent or tool system exists yet. There's also no HTTP search endpoint
+  yet — `EmbeddingPipeline.search()` works today, but it's called directly
+  from Python, not over HTTP (that's Milestone 4).
+- No reranking — results are raw vector-similarity order. The retrieval
+  pipeline diagram this project targets treats reranking as optional, and
+  it isn't built yet.
+- The FAISS index is a flat (exact) index, rebuilt in-place per repository.
+  Fine at the scale a single local repository produces; would need an
+  approximate index (IVF/HNSW) to scale to millions of chunks.
 - Non-Python languages use a syntax-unaware sliding-window chunker; only
   Python gets function/method-precise chunks. Language support is currently
   strongest for Python, as expected from the project's scope.
