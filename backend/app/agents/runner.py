@@ -7,9 +7,23 @@ from sqlalchemy.orm import Session
 
 from app.agents.context_manager import ContextManager, format_observation
 from app.agents.planner import Planner
-from app.agents.state import AgentAction, AgentDecision, AgentState, AgentStatus, ToolCallRecord
+from app.agents.state import (
+    AgentAction,
+    AgentDecision,
+    AgentState,
+    AgentStatus,
+    TestRunRecord,
+    ToolCallRecord,
+)
 from app.agents.termination import check_termination
-from app.database.models import AgentEvent, AgentRun, AgentToolCall, ModifiedFile, Repository
+from app.database.models import (
+    AgentEvent,
+    AgentRun,
+    AgentToolCall,
+    ModifiedFile,
+    Repository,
+    TestRun,
+)
 from app.llm.base import LLMProvider, Message
 from app.llm.exceptions import LLMProviderError
 from app.retrieval.indexer import RepositoryNotFoundError
@@ -24,9 +38,11 @@ class AgentRunner:
     """The basic agent loop: TASK -> PLAN -> (OBSERVE -> SELECT TOOL ->
     EXECUTE -> UPDATE STATE)* -> DONE, persisted incrementally to SQLite so
     a run survives a process restart and is inspectable mid-flight via the
-    API. The agent can now modify code via apply_patch, but it still can't
-    run tests (Milestone 8 adds that) — so a modification is always at most
-    "unverified," never confirmed to actually fix anything.
+    API. The agent can modify code (apply_patch) and run tests (run_tests)
+    to check its own work — self-correction (iterating after a test
+    failure) isn't special-cased anywhere: it emerges from the same loop,
+    since run_tests is just another tool the model can choose to call again
+    after seeing a failure.
     """
 
     def __init__(self, session: Session, llm: LLMProvider, tool_registry: ToolRegistry, max_iterations: int):
@@ -110,6 +126,8 @@ class AgentRunner:
 
         if action.tool == "apply_patch" and result.success:
             self._record_modified_file(run_row.id, state, result.output)
+        elif action.tool == "run_tests" and result.success:
+            self._record_test_run(run_row.id, state, result.output)
 
         self._emit_event(
             run_row.id, state.iteration, "tool_completed", {"tool": action.tool, "success": result.success}
@@ -124,6 +142,34 @@ class AgentRunner:
                 diff=output["diff"],
                 lines_added=output["lines_added"],
                 lines_removed=output["lines_removed"],
+            )
+        )
+
+    def _record_test_run(self, run_id: str, state: AgentState, output: dict) -> None:
+        state.test_results.append(
+            TestRunRecord(
+                command=output["command"],
+                scope=output["scope"],
+                passed=output["passed"],
+                failed_tests=output["failed_tests"],
+                failure_category=output["failure_category"],
+            )
+        )
+        self._session.add(
+            TestRun(
+                repository_id=state.repository_id,
+                run_id=run_id,
+                command=output["command"],
+                scope=output["scope"],
+                exit_code=output["exit_code"],
+                passed=output["passed"],
+                total_tests=output["total_tests"],
+                passed_tests=output["passed_tests"],
+                failed_tests_json=json.dumps(output["failed_tests"]),
+                failure_category=output["failure_category"],
+                duration_seconds=output["duration_seconds"],
+                stdout=output["stdout"],
+                stderr=output["stderr"],
             )
         )
 

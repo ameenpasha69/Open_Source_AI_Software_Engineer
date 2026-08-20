@@ -6,11 +6,9 @@ _MAX_CONTENT_PREVIEW_CHARS = 800
 _MAX_RECENT_OBSERVATIONS = 12
 
 _SYSTEM_PROMPT_TEMPLATE = """You are a software engineering agent investigating a reported issue in a \
-local repository. You cannot run tests yet — you have no way to confirm a change actually fixes the \
-issue, so any fix you apply is unverified. Gather evidence with the tools below before changing anything: \
-read the relevant code, understand the root cause, and only then make the smallest safe fix with \
-apply_patch. Never cite a location, or claim a root cause, you have not actually observed through a tool \
-result.
+local repository. Gather evidence with the tools below before changing anything: read the relevant code, \
+understand the root cause, and only then make the smallest safe fix with apply_patch. Never cite a \
+location, or claim a root cause, you have not actually observed through a tool result.
 
 Available tools (you are already scoped to one repository — never include "repository_id" yourself):
 {tool_descriptions}
@@ -20,14 +18,20 @@ unified diff, and old_content must match the file's actual current content exact
 first if you're not sure). Prefer the smallest change that addresses the root cause over rewriting \
 whole functions.
 
+After applying a patch, run_tests to check your work. If tests fail, read the failure (failed_tests, \
+failure_category) and iterate: adjust your patch and run_tests again, rather than finishing on a change \
+you haven't verified. run_tests may not be available for every repository (no test command is configured) \
+— if so, say the fix is unverified rather than claiming it works.
+
 Each turn, respond with ONLY a JSON object matching this schema, no other text:
 {{"thought": string, "action": {{"tool": string, "input": object}} | null, "finish": {{"answer": string, \
 "root_cause": string | null}} | null}}
 
-Set exactly one of "action" or "finish". Use "action" to call a tool and gather more evidence or apply a \
-fix, with "input" containing exactly the parameters listed for that tool. Use "finish" once you have \
-enough evidence to explain the root cause (and have applied a fix, if the issue calls for a code change), \
-or if you have exhausted reasonable avenues of investigation and must report what you found so far."""
+Set exactly one of "action" or "finish". Use "action" to call a tool and gather more evidence, apply a \
+fix, or verify one, with "input" containing exactly the parameters listed for that tool. Use "finish" \
+once you have enough evidence to explain the root cause (having applied and, where possible, verified a \
+fix, if the issue calls for a code change), or if you have exhausted reasonable avenues of investigation \
+and must report what you found so far."""
 
 
 def _format_tool_signature(spec: ToolSpec) -> str:
@@ -131,8 +135,35 @@ def _summarize_output(tool_name: str, output: dict) -> str:
         header = f"patched {output.get('path')} ({stats}, unverified — no test run yet)"
         return f"{header}:\n{_truncate(output.get('diff', ''))}"
 
+    if tool_name == "run_tests":
+        return _summarize_test_run(output)
+
+    if tool_name in ("run_command", "run_linter", "run_formatter"):
+        status = "passed" if output.get("passed") else f"failed (exit {output.get('exit_code')})"
+        combined = (output.get("stdout", "") + output.get("stderr", "")).strip()
+        return f"{output.get('command')} -> {status}:\n{_truncate(combined)}"
+
     # No tool-specific summarizer — fall back to a truncated generic dump.
     return _truncate(str(output))
+
+
+def _summarize_test_run(output: dict) -> str:
+    if output.get("passed"):
+        total = output.get("total_tests")
+        counts = f"{output.get('passed_tests')}/{total} passed" if total is not None else "passed"
+        return f"PASSED ({output.get('scope')} run, {counts})"
+
+    category = output.get("failure_category")
+    if category == "test_failure":
+        failed = output.get("failed_tests") or []
+        failed_preview = "; ".join(failed[:10]) + (" ..." if len(failed) > 10 else "")
+        return f"FAILED ({output.get('scope')} run) — {len(failed)} failing test(s): {failed_preview}"
+
+    # syntax_error / dependency_error / environment_error / timeout: the run
+    # itself didn't complete meaningfully, so surface raw output instead of a
+    # test-count summary that wouldn't mean anything here.
+    combined = (output.get("stdout", "") + output.get("stderr", "")).strip()
+    return f"FAILED TO RUN ({category}):\n{_truncate(combined)}"
 
 
 def _truncate(text: str) -> str:

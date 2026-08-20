@@ -3,11 +3,19 @@ import json
 import pytest
 from app.agents.runner import AgentRunner
 from app.agents.state import AgentStatus
-from app.database.models import AgentEvent, AgentRun, AgentToolCall, ModifiedFile
+from app.database.models import (
+    AgentEvent,
+    AgentRun,
+    AgentToolCall,
+    ModifiedFile,
+    Repository,
+    TestRun,
+)
 from app.llm.exceptions import LLMConnectionError
 from app.retrieval.indexer import RepositoryIndexer, RepositoryNotFoundError
 from app.tools.base import ToolRegistry
 from app.tools.code_search_tools import FindSymbolTool
+from app.tools.execution_tools import RunTestsTool
 from app.tools.file_tools import ReadFileTool
 from app.tools.patch_tools import ApplyPatchTool
 from sqlalchemy import select
@@ -29,6 +37,7 @@ def tool_registry(db_session):
     registry.register(FindSymbolTool(db_session))
     registry.register(ReadFileTool(db_session, max_file_size_bytes=1_000_000))
     registry.register(ApplyPatchTool(db_session))
+    registry.register(RunTestsTool(db_session, timeout_seconds=30.0))
     return registry
 
 
@@ -212,3 +221,114 @@ async def test_agent_run_persists_failed_status_on_unexpected_error(
     assert "Unexpected agent error" in state.error
     run_row = db_session.get(AgentRun, state.run_id)
     assert run_row.status == "failed"
+
+
+@pytest.fixture
+def calc_repo(tmp_path):
+    repo = tmp_path / "calc_repo"
+    repo.mkdir()
+    (repo / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+    (repo / "test_calc.py").write_text("from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n")
+    return repo
+
+
+@pytest.fixture
+def calc_repository_id(db_session, calc_repo):
+    indexer = RepositoryIndexer(
+        session=db_session, chunk_max_lines=200, chunk_overlap_lines=20, max_file_size_bytes=1_000_000
+    )
+    result = indexer.index(calc_repo)
+    repository = db_session.get(Repository, result.repository_id)
+    repository.test_command_json = json.dumps(["python3", "-m", "pytest"])
+    db_session.commit()
+    return result.repository_id
+
+
+def _apply_patch_action(old_content: str, new_content: str) -> str:
+    payload = {
+        "thought": "applying fix",
+        "action": {
+            "tool": "apply_patch",
+            "input": {"path": "calc.py", "old_content": old_content, "new_content": new_content},
+        },
+        "finish": None,
+    }
+    return json.dumps(payload)
+
+
+_RUN_TESTS_ACTION = json.dumps(
+    {"thought": "check the fix", "action": {"tool": "run_tests", "input": {}}, "finish": None}
+)
+_FINISH_VERIFIED = json.dumps(
+    {"thought": "tests pass", "action": None, "finish": {"answer": "fixed and verified", "root_cause": "used - instead of +"}}
+)
+
+
+async def test_agent_verifies_a_correct_fix_with_run_tests(db_session, calc_repository_id, tool_registry):
+    llm = FakeLLMProvider(
+        responses=[
+            _PLAN_RESPONSE,
+            _apply_patch_action("return a - b", "return a + b"),
+            _RUN_TESTS_ACTION,
+            _FINISH_VERIFIED,
+        ]
+    )
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=6)
+
+    state = await runner.run(calc_repository_id, "add(a, b) returns the wrong value")
+
+    assert state.status == AgentStatus.DONE
+    assert state.modified_files == ["calc.py"]
+    assert len(state.test_results) == 1
+    assert state.test_results[0].passed is True
+    assert state.verification_status == "verified"
+
+
+async def test_agent_self_corrects_after_a_failing_test_run(db_session, calc_repository_id, tool_registry):
+    """The core self-correction behavior: a wrong first patch, a failing
+    run_tests, a corrected second patch, a passing run_tests — driven
+    entirely by the ordinary loop, no special-casing for "retry after
+    failure" anywhere in AgentRunner."""
+    llm = FakeLLMProvider(
+        responses=[
+            _PLAN_RESPONSE,
+            _apply_patch_action("return a - b", "return a * b"),  # still wrong
+            _RUN_TESTS_ACTION,  # fails
+            _apply_patch_action("return a * b", "return a + b"),  # corrected
+            _RUN_TESTS_ACTION,  # passes
+            _FINISH_VERIFIED,
+        ]
+    )
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=8)
+
+    state = await runner.run(calc_repository_id, "add(a, b) returns the wrong value")
+
+    assert state.status == AgentStatus.DONE
+    assert state.modified_files == ["calc.py", "calc.py"]  # two apply_patch calls
+    assert len(state.test_results) == 2
+    assert state.test_results[0].passed is False
+    assert state.test_results[0].failure_category == "test_failure"
+    assert state.test_results[1].passed is True
+    assert state.verification_status == "verified"  # derived from the *last* run only
+
+
+async def test_agent_run_persists_test_runs(db_session, calc_repository_id, tool_registry):
+    llm = FakeLLMProvider(
+        responses=[
+            _PLAN_RESPONSE,
+            _apply_patch_action("return a - b", "return a + b"),
+            _RUN_TESTS_ACTION,
+            _FINISH_VERIFIED,
+        ]
+    )
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=6)
+
+    state = await runner.run(calc_repository_id, "task")
+
+    run_row = db_session.get(AgentRun, state.run_id)
+    assert run_row.verification_status == "verified"
+
+    test_runs = db_session.scalars(select(TestRun).where(TestRun.run_id == state.run_id)).all()
+    assert len(test_runs) == 1
+    assert test_runs[0].passed is True
+    assert test_runs[0].repository_id == calc_repository_id

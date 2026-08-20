@@ -141,3 +141,31 @@ async def test_apply_patch_diff_uses_git_style_headers(db_session, patchable_rep
     )
     assert "--- a/service.py" in result.diff
     assert "+++ b/service.py" in result.diff
+
+
+async def test_apply_patch_works_when_repository_path_is_a_symlink(db_session, tmp_path):
+    """Regression test: repository.path stored as an unresolved path whose
+    resolved form differs (e.g. a symlink) must not crash — this bit us for
+    real via macOS's /tmp -> /private/tmp, found through live end-to-end
+    testing, not code review."""
+    real_dir = tmp_path / "real_repo"
+    real_dir.mkdir()
+    (real_dir / "service.py").write_text("def f():\n    return 1\n")
+
+    symlink_path = tmp_path / "repo_via_symlink"
+    symlink_path.symlink_to(real_dir)
+    assert symlink_path.resolve() != symlink_path  # the scenario actually applies
+
+    repository = Repository(name="symlinked_repo", path=str(symlink_path))
+    db_session.add(repository)
+    db_session.flush()
+
+    tool = ApplyPatchTool(db_session)
+    result = await tool.run(
+        ApplyPatchInput(
+            repository_id=repository.id, path="service.py", old_content="return 1", new_content="return 2"
+        )
+    )
+
+    assert result.path == "service.py"
+    assert (real_dir / "service.py").read_text() == "def f():\n    return 2\n"

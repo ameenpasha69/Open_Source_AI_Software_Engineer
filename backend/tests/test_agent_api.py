@@ -149,3 +149,39 @@ async def test_get_diff_for_unknown_run_returns_404(client):
     async with AsyncClient(transport=client, base_url="http://test") as http:
         resp = await http.get("/api/agent/does-not-exist/diff")
     assert resp.status_code == 404
+
+
+_RUN_TESTS_ACTION = '{"thought": "check the fix", "action": {"tool": "run_tests", "input": {}}, "finish": null}'
+_FINISH_VERIFIED = (
+    '{"thought": "tests pass", "action": null, '
+    '"finish": {"answer": "fixed and verified", "root_cause": "used - instead of +"}}'
+)
+
+
+async def test_run_agent_end_to_end_with_verified_fix(client, tmp_path):
+    calc_repo = tmp_path / "calc_repo"
+    calc_repo.mkdir()
+    (calc_repo / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+    (calc_repo / "test_calc.py").write_text(
+        "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    )
+    repository_id = await _index(client, calc_repo)
+
+    apply_patch_action = (
+        '{"thought": "fix add", "action": {"tool": "apply_patch", '
+        '"input": {"path": "calc.py", "old_content": "return a - b", "new_content": "return a + b"}}, '
+        '"finish": null}'
+    )
+    _use_scripted_llm([_PLAN_RESPONSE, apply_patch_action, _RUN_TESTS_ACTION, _FINISH_VERIFIED])
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        resp = await http.post(
+            "/api/agent/run", json={"repository_id": repository_id, "task": "add(a, b) returns the wrong value"}
+        )
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == "done"
+    assert body["modified_files"] == ["calc.py"]
+    assert body["verification_status"] == "verified"
+    assert (calc_repo / "calc.py").read_text() == "def add(a, b):\n    return a + b\n"

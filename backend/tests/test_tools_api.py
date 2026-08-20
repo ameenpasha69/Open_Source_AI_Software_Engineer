@@ -25,6 +25,10 @@ async def test_list_tools_returns_all_registered_tools(client):
         "get_git_diff",
         "get_git_log",
         "apply_patch",
+        "run_tests",
+        "run_command",
+        "run_linter",
+        "run_formatter",
     }
 
 

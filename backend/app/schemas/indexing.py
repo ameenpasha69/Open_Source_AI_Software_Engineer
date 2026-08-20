@@ -20,6 +20,12 @@ class CodeChunkOut(BaseModel):
 class IndexRepositoryRequest(BaseModel):
     path: str
     name: str | None = None
+    # Explicit overrides for run_tests/run_linter/run_formatter. None means
+    # "don't change" on re-index, not "clear" — a Python-majority repository
+    # gets a sensible default automatically if never set at all.
+    test_command: list[str] | None = None
+    lint_command: list[str] | None = None
+    format_command: list[str] | None = None
 
 
 class EmbeddingSyncResult(BaseModel):
@@ -53,3 +59,6 @@ class RepositorySummary(BaseModel):
     indexed_file_count: int
     chunk_count: int
     embedded_chunk_count: int
+    test_command: list[str] | None
+    lint_command: list[str] | None
+    format_command: list[str] | None

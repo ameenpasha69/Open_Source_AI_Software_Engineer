@@ -14,4 +14,9 @@ def get_repository(session: Session, repository_id: str) -> Repository:
 
 
 def get_repository_root(session: Session, repository_id: str) -> Path:
-    return Path(get_repository(session, repository_id).path)
+    """Always resolved (symlinks followed, e.g. macOS /tmp -> /private/tmp).
+    `resolve_safe_path()` also returns resolved paths — callers that compare
+    the two directly (relative_to, ignored-directory checks) need both sides
+    resolved consistently or the comparison raises spuriously.
+    """
+    return Path(get_repository(session, repository_id).path).resolve()

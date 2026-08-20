@@ -20,6 +20,7 @@ This project is being built incrementally, one milestone at a time (see
 - ✅ **Milestone 5** — Agent tool registry (read-only investigation tools)
 - ✅ **Milestone 6** — Basic agent loop (investigation and diagnosis)
 - ✅ **Milestone 7** — Code modification (`apply_patch`)
+- ✅ **Milestone 8** — Test execution + self-correction
 
 Everything below this line describes what exists *today*, not the end goal.
 The full architecture (agent loop, retrieval, tool system, evaluation
@@ -190,6 +191,10 @@ class Tool(ABC):
 | `get_git_diff` | Working-tree or staged diff, optionally scoped to a path |
 | `get_git_log` | Recent commit history, optionally scoped to a path |
 | `apply_patch` | Replace an exact, unique excerpt of a file's content (Milestone 7 — see Code modification) |
+| `run_tests` | Run the configured test command; structured pass/fail + failure category (Milestone 8) |
+| `run_command` | Run an allowlisted command (`python`, `pytest`, `ruff`, `npm`, ...) (Milestone 8) |
+| `run_linter` | Run the configured linter (Milestone 8) |
+| `run_formatter` | Run the configured formatter — rewrites files in place (Milestone 8) |
 
 **Path safety**: every file-path argument is resolved through
 `resolve_safe_path()`, which rejects anything escaping the repository root —
@@ -353,6 +358,87 @@ Milestone 6, now with `apply_patch` too: this looks like an attention/
 recall limitation under a long agentic loop, not a tooling bug — the tools
 returned exactly the right information both times.
 
+## Test execution and self-correction
+
+The agent can now run tests and react to the result — `run_tests`,
+`run_command`, `run_linter`, `run_formatter` — which is what finally lets
+`verification_status` become something other than "unverified".
+
+**Self-correction isn't special-cased anywhere.** `run_tests` is just
+another registered tool. The loop that lets the agent patch, test, see a
+failure, patch again, and test again is the *same* loop from Milestone 6 —
+nothing in `AgentRunner` knows about "retrying after a test failure." That
+behavior falls out of the model choosing to call `run_tests` again after
+seeing a `test_failure` observation, the same way it chooses any other tool.
+
+**Structured results, not a terminal dump.** `run_tests` parses pytest's
+default output (the `N failed, M passed in Xs` summary line and `FAILED
+<nodeid>` lines — verified against real pytest output before writing the
+regex, not guessed) into pass/fail counts and failed test ids, and
+classifies *why* a run failed:
+
+| `failure_category` | Means |
+|---|---|
+| `test_failure` | The code under test is wrong — this is the "normal" case to iterate on |
+| `syntax_error` | The patch broke the file's syntax |
+| `dependency_error` | `ModuleNotFoundError`/`ImportError` — an environment problem, not a code problem |
+| `environment_error` | pytest itself couldn't run (bad path, no tests collected, ...) |
+| `timeout` | The command exceeded its timeout |
+
+The agent should react differently to `test_failure` (keep fixing the code)
+than to `environment_error` (the fix might be fine — the harness couldn't
+verify it). This distinction is enforced by the parser, not left for the
+model to infer from raw output.
+
+**Command execution is sandboxed, not free-form.** `run_command` (and the
+argv `run_tests`/`run_linter`/`run_formatter` construct from repository
+config) only executes binaries on an explicit allowlist (`python`, `pytest`,
+`ruff`, `npm`, `git`, ...) — `rm`, `sudo`, `curl`, and anything else not
+listed are refused outright, regardless of arguments, before a process is
+even spawned. Every sandboxed subprocess also gets a curated environment
+(`PATH`/`HOME`/`LANG`/an active venv, nothing else) instead of the full host
+environment — verified live: a real subprocess asked to print a host secret
+env var got back `"NOT_SET"`, not the value.
+
+**`verification_status` derives from the *last* test run**, not a full
+correlation with which patch it was checking (a deliberate simplification):
+
+```text
+not_applicable    → nothing was ever modified
+unverified        → modified, but run_tests was never called
+failed            → most recent run_tests call failed
+partially_verified → most recent call passed, but was scoped to specific tests
+verified          → most recent call passed, running the full suite
+```
+
+**Test commands are configured, not guessed per call.** A repository's
+`test_command`/`lint_command`/`format_command` are resolved once (explicitly
+via `IndexRepositoryRequest`, or auto-defaulted to `pytest`/`ruff` for a
+Python-majority repository — reusing the language breakdown indexing
+already computes, not a second detection pass) and stored on the
+`Repository` row. Re-indexing without specifying a command preserves
+whatever was already configured rather than clearing it.
+
+**Two real bugs, found only by running the loop against real Ollama, not
+by code review:**
+
+1. **Stale bytecode across a patch-then-test cycle.** The very first
+   self-correction test looked like it wasn't picking up a fix: the file on
+   disk was correctly patched, but the second `run_tests` call still failed
+   with the pre-patch result. CPython's default `.pyc` cache invalidation
+   compares source mtime at *second* granularity — patch-then-immediately-
+   retest can land within the same wall-clock second, so Python silently
+   re-executed the stale compiled bytecode from before the fix. Fixed by
+   setting `PYTHONDONTWRITEBYTECODE=1` in every sandboxed subprocess's
+   environment, so no `.pyc` is ever written in the first place.
+2. **The model reasonably emits `"input": null`, not `"input": {}`, for a
+   tool that needs no arguments** (`run_tests` with no `test_path`) — strict
+   dict validation was rejecting that outright. Caught live: a real run spent
+   4 of its 8 iterations on `invalid_decision` before recovering. One
+   Pydantic field validator later (`None` → `{}`), the identical task
+   completed correctly in 4 iterations instead of 8, in 9 seconds instead of
+   27 — verified by re-running the exact same scenario before and after.
+
 ## Hardware / model defaults
 
 Defaults were chosen for a machine with 16GB+ RAM and no dedicated GPU
@@ -434,8 +520,8 @@ backend/
     database/    # SQLAlchemy models + session management (SQLite)
     embeddings/  # EmbeddingProvider abstraction + Ollama backend
     retrieval/   # repository walker, chunker, FAISS vector store, embedding pipeline
-    tools/       # Tool/ToolRegistry/ToolExecutor + file, code-search, git, and patch tools
-    execution/   # sandboxed subprocess runner (fixed argv, timeout, output caps)
+    tools/       # Tool/ToolRegistry/ToolExecutor + file, code-search, git, patch, and execution tools
+    execution/   # sandboxed subprocess runner (allowlist, env isolation, timeout, output caps)
     api/routes/  # FastAPI routers
     schemas/     # Pydantic request/response models
     agents/      # AgentRunner, Planner, ContextManager, state, termination logic
@@ -451,10 +537,19 @@ docs/
 
 - Only Ollama is implemented as an LLM/embedding provider; the interfaces
   support others but none are built yet.
-- **The agent can act but can't verify.** `apply_patch` exists, but
-  `run_command`/`run_tests` don't yet (Milestone 8), so every modification
-  is permanently "unverified" until then — the agent has no way to confirm
-  a patch actually fixes anything, or even that it didn't break something else.
+- **No Docker sandboxing yet** — command execution is a local subprocess with
+  an allowlist, environment isolation, and timeouts, which is a real safety
+  boundary but not the same as container isolation. Docker was deliberately
+  scoped out of Milestone 8 (it's fundamentally a hardening concern, not
+  core self-correction functionality) to the dedicated Milestone 11.
+- **Test/lint/format commands are Python-only auto-detected** — anything else
+  needs explicit configuration via `IndexRepositoryRequest`. Guessing wrong
+  for other ecosystems would be worse than requiring the user to say so.
+- **`run_tests` output parsing is pytest-specific** — verified against real
+  pytest output, but a differently-formatted test runner (or a custom
+  `test_command`) still executes and reports pass/fail correctly; it just
+  won't get individual failed-test-id extraction or fine-grained
+  `failure_category` classification the way pytest output does.
 - **Small local models under-commit to finishing — and a bigger model isn't
   automatically the fix.** In live testing on the same investigation task
   (`qwen2.5-coder:7b`, default), the agent chose sensible tools, every call

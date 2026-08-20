@@ -26,6 +26,14 @@ class Repository(Base):
     path: Mapped[str] = mapped_column(String(1024))
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     last_indexed_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
+    # JSON-encoded argv lists (e.g. ["python3", "-m", "pytest"]). Set explicitly
+    # via IndexRepositoryRequest, or auto-defaulted post-indexing for a
+    # Python-majority repository — see retrieval/command_detection.py. None
+    # means "not configured"; run_tests/run_linter/run_formatter raise a
+    # clear ToolError rather than guessing.
+    test_command_json: Mapped[str | None] = mapped_column(Text)
+    lint_command_json: Mapped[str | None] = mapped_column(Text)
+    format_command_json: Mapped[str | None] = mapped_column(Text)
 
     index_runs: Mapped[list["IndexRun"]] = relationship(back_populates="repository", cascade="all, delete-orphan")
     indexed_files: Mapped[list["IndexedFile"]] = relationship(
@@ -124,6 +132,7 @@ class AgentRun(Base):
     events: Mapped[list["AgentEvent"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     tool_calls: Mapped[list["AgentToolCall"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     modified_files: Mapped[list["ModifiedFile"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    test_runs: Mapped[list["TestRun"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
 
 class AgentEvent(Base):
@@ -182,3 +191,31 @@ class ModifiedFile(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     run: Mapped[AgentRun] = relationship(back_populates="modified_files")
+
+
+class TestRun(Base):
+    """One run_tests execution — repository_id-scoped so it works whether or
+    not it happened inside an agent run (run_id nullable, for a standalone
+    POST /api/tools/execute call)."""
+
+    __test__ = False  # not a pytest test class — this name just mirrors the domain
+    __tablename__ = "test_runs"
+    __table_args__ = (Index("ix_test_runs_run_id", "run_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    repository_id: Mapped[str] = mapped_column(ForeignKey("repositories.id"))
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"))
+    command: Mapped[str] = mapped_column(String(1024))
+    scope: Mapped[str] = mapped_column(String(16))  # "full" | "targeted"
+    exit_code: Mapped[int] = mapped_column(Integer)
+    passed: Mapped[bool] = mapped_column(default=False)
+    total_tests: Mapped[int | None] = mapped_column(Integer)
+    passed_tests: Mapped[int | None] = mapped_column(Integer)
+    failed_tests_json: Mapped[str] = mapped_column(Text, default="[]")
+    failure_category: Mapped[str] = mapped_column(String(32))
+    duration_seconds: Mapped[float] = mapped_column(default=0.0)
+    stdout: Mapped[str] = mapped_column(Text, default="")
+    stderr: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    run: Mapped[AgentRun | None] = relationship(back_populates="test_runs")

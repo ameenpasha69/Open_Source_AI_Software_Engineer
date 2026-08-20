@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     # also be overridden per-request via SearchRequest.rerank.
     search_reranking_enabled: bool = False
 
+    # --- Execution / testing ---
+    # Test suites can legitimately take a while; kept separate from the other,
+    # much shorter tool timeouts (git commands, file reads).
+    test_execution_timeout_seconds: float = 120.0
+
     @property
     def database_url(self) -> str:
         return f"sqlite:///{self.data_dir / 'app.db'}"
