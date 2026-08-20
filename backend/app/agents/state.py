@@ -11,6 +11,7 @@ class AgentStatus(StrEnum):
     DONE = "done"
     FAILED = "failed"
     MAX_ITERATIONS_REACHED = "max_iterations_reached"
+    CANCELLED = "cancelled"
 
 
 class AgentAction(BaseModel):

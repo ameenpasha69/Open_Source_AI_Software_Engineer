@@ -1,9 +1,15 @@
 import hashlib
 
 import pytest
+from app.agents.background import get_background_agent_runner
 from app.config.settings import Settings, get_settings
 from app.database.models import Repository
-from app.database.session import create_sqlite_engine, get_db_session, get_session_factory
+from app.database.session import (
+    create_sqlite_engine,
+    get_db_session,
+    get_session_factory,
+    get_session_factory_dependency,
+)
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.factory import get_embedding_provider
 from app.llm.base import LLMProvider, LLMResponse, Message
@@ -115,6 +121,7 @@ def client(tmp_path, fake_embedding_provider):
             session.close()
 
     app.dependency_overrides[get_db_session] = override_get_db_session
+    app.dependency_overrides[get_session_factory_dependency] = lambda: session_factory
     app.dependency_overrides[get_embedding_provider] = lambda: fake_embedding_provider
     app.dependency_overrides[get_settings] = lambda: test_settings
     yield ASGITransport(app=app)
@@ -148,3 +155,13 @@ def bare_repository(db_session, sample_repo):
     db_session.add(repository)
     db_session.flush()
     return repository
+
+
+async def wait_for_agent_run(run_id: str) -> None:
+    """POST /api/agent/run now returns immediately (status "running") and
+    finishes the run in a background asyncio.Task. Await that same tracked
+    task directly instead of sleep-polling the API — deterministic and fast,
+    since FakeLLMProvider has no real network latency to wait out."""
+    task = get_background_agent_runner().get_task(run_id)
+    if task is not None:
+        await task

@@ -25,6 +25,17 @@ def get_session_factory(engine: Engine | None = None) -> sessionmaker[Session]:
     return sessionmaker(bind=engine or get_engine(), expire_on_commit=False)
 
 
+def get_session_factory_dependency() -> sessionmaker[Session]:
+    """FastAPI-injectable accessor for the session *factory* itself, not a
+    session — for code that must create its own session(s) outside the
+    request lifecycle (a background asyncio.Task can't use `Depends()`).
+    Override this alongside `get_db_session` in tests, pointed at the same
+    factory, so a background task in a test doesn't fall through to the
+    real on-disk database.
+    """
+    return get_session_factory()
+
+
 def get_db_session() -> Generator[Session]:
     """FastAPI dependency yielding a request-scoped session. Override in tests
     with a session factory bound to a temporary database."""

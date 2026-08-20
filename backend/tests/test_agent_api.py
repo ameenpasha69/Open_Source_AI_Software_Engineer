@@ -1,8 +1,10 @@
+import asyncio
+
 from app.llm.factory import get_llm_provider
 from app.main import app
 from httpx import AsyncClient
 
-from tests.conftest import FakeLLMProvider
+from tests.conftest import FakeLLMProvider, wait_for_agent_run
 
 _PLAN_RESPONSE = '{"steps": ["Search the codebase"]}'
 _FINISH_RESPONSE = '{"thought": "found it", "action": null, "finish": {"answer": "it is in main.py", "root_cause": "n/a"}}'
@@ -19,7 +21,21 @@ def _use_scripted_llm(responses: list[str]) -> None:
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(responses=responses)
 
 
-async def test_run_agent_returns_completed_run_summary(client, sample_repo):
+async def _run_agent_and_wait(client, repository_id: str, task: str) -> dict:
+    """POST /api/agent/run, wait for the background task to finish, and
+    return the final GET /api/agent/{run_id} body."""
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": task})
+        assert resp.status_code == 200
+        run_id = resp.json()["id"]
+
+        await wait_for_agent_run(run_id)
+
+        final = await http.get(f"/api/agent/{run_id}")
+    return final.json()
+
+
+async def test_run_agent_returns_immediately_with_running_status(client, sample_repo):
     repository_id = await _index(client, sample_repo)
     _use_scripted_llm([_PLAN_RESPONSE, _FINISH_RESPONSE])
 
@@ -29,7 +45,16 @@ async def test_run_agent_returns_completed_run_summary(client, sample_repo):
         )
 
     assert resp.status_code == 200
-    body = resp.json()
+    assert resp.json()["status"] == "running"
+    await wait_for_agent_run(resp.json()["id"])  # let it finish before the test ends
+
+
+async def test_run_agent_completes_in_the_background(client, sample_repo):
+    repository_id = await _index(client, sample_repo)
+    _use_scripted_llm([_PLAN_RESPONSE, _FINISH_RESPONSE])
+
+    body = await _run_agent_and_wait(client, repository_id, "Where is entrypoint defined?")
+
     assert body["status"] == "done"
     assert body["final_answer"] == "it is in main.py"
     assert body["plan"] == ["Search the codebase"]
@@ -49,15 +74,9 @@ async def test_get_agent_run_returns_persisted_state(client, sample_repo):
     repository_id = await _index(client, sample_repo)
     _use_scripted_llm([_PLAN_RESPONSE, _FINISH_RESPONSE])
 
-    async with AsyncClient(transport=client, base_url="http://test") as http:
-        run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
-        run_id = run_resp.json()["id"]
+    body = await _run_agent_and_wait(client, repository_id, "task")
 
-        get_resp = await http.get(f"/api/agent/{run_id}")
-
-    assert get_resp.status_code == 200
-    assert get_resp.json()["id"] == run_id
-    assert get_resp.json()["status"] == "done"
+    assert body["status"] == "done"
 
 
 async def test_get_unknown_agent_run_returns_404(client):
@@ -73,6 +92,7 @@ async def test_get_agent_run_events_returns_ordered_timeline(client, sample_repo
     async with AsyncClient(transport=client, base_url="http://test") as http:
         run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
         run_id = run_resp.json()["id"]
+        await wait_for_agent_run(run_id)
 
         events_resp = await http.get(f"/api/agent/{run_id}/events")
 
@@ -102,11 +122,8 @@ async def test_run_agent_with_patch_reports_modified_files_and_verification_stat
     repository_id = await _index(client, sample_repo)
     _use_scripted_llm([_PLAN_RESPONSE, _APPLY_PATCH_ACTION, _FINISH_AFTER_PATCH])
 
-    async with AsyncClient(transport=client, base_url="http://test") as http:
-        resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
+    body = await _run_agent_and_wait(client, repository_id, "task")
 
-    assert resp.status_code == 200
-    body = resp.json()
     assert body["modified_files"] == ["main.py"]
     assert body["verification_status"] == "unverified"
 
@@ -118,6 +135,7 @@ async def test_get_agent_run_diff_returns_per_file_diffs(client, sample_repo):
     async with AsyncClient(transport=client, base_url="http://test") as http:
         run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
         run_id = run_resp.json()["id"]
+        await wait_for_agent_run(run_id)
 
         diff_resp = await http.get(f"/api/agent/{run_id}/diff")
 
@@ -136,6 +154,7 @@ async def test_get_agent_run_diff_empty_when_no_modifications(client, sample_rep
     async with AsyncClient(transport=client, base_url="http://test") as http:
         run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
         run_id = run_resp.json()["id"]
+        await wait_for_agent_run(run_id)
 
         diff_resp = await http.get(f"/api/agent/{run_id}/diff")
 
@@ -174,14 +193,78 @@ async def test_run_agent_end_to_end_with_verified_fix(client, tmp_path):
     )
     _use_scripted_llm([_PLAN_RESPONSE, apply_patch_action, _RUN_TESTS_ACTION, _FINISH_VERIFIED])
 
-    async with AsyncClient(transport=client, base_url="http://test") as http:
-        resp = await http.post(
-            "/api/agent/run", json={"repository_id": repository_id, "task": "add(a, b) returns the wrong value"}
-        )
+    body = await _run_agent_and_wait(client, repository_id, "add(a, b) returns the wrong value")
 
-    assert resp.status_code == 200
-    body = resp.json()
     assert body["status"] == "done"
     assert body["modified_files"] == ["calc.py"]
     assert body["verification_status"] == "verified"
     assert (calc_repo / "calc.py").read_text() == "def add(a, b):\n    return a + b\n"
+
+
+async def test_cancel_agent_run_stops_it_and_marks_cancelled(client, sample_repo):
+    repository_id = await _index(client, sample_repo)
+
+    class NeverRespondingLLM(FakeLLMProvider):
+        async def generate(self, messages, *, temperature=None, max_tokens=None, json_mode=False):
+            await asyncio.Event().wait()  # hangs until the task is cancelled
+
+    app.dependency_overrides[get_llm_provider] = lambda: NeverRespondingLLM()
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
+        run_id = run_resp.json()["id"]
+
+        cancel_resp = await http.post(f"/api/agent/{run_id}/cancel")
+
+    assert cancel_resp.status_code == 200
+    assert cancel_resp.json()["status"] == "cancelled"
+
+
+async def test_cancel_already_finished_run_is_a_noop(client, sample_repo):
+    repository_id = await _index(client, sample_repo)
+    _use_scripted_llm([_PLAN_RESPONSE, _FINISH_RESPONSE])
+
+    body = await _run_agent_and_wait(client, repository_id, "task")
+    assert body["status"] == "done"
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        cancel_resp = await http.post(f"/api/agent/{body['id']}/cancel")
+
+    assert cancel_resp.status_code == 200
+    assert cancel_resp.json()["status"] == "done"  # unchanged, not overwritten with "cancelled"
+
+
+async def test_cancel_unknown_run_returns_404(client):
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        resp = await http.post("/api/agent/does-not-exist/cancel")
+    assert resp.status_code == 404
+
+
+async def test_stream_agent_run_emits_events_and_closes_on_completion(client, sample_repo):
+    repository_id = await _index(client, sample_repo)
+    _use_scripted_llm([_PLAN_RESPONSE, _FINISH_RESPONSE])
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
+        run_id = run_resp.json()["id"]
+
+        async with http.stream("GET", f"/api/agent/{run_id}/stream") as stream_resp:
+            assert stream_resp.status_code == 200
+            assert "text/event-stream" in stream_resp.headers["content-type"]
+
+            event_types = []
+            async for line in stream_resp.aiter_lines():
+                if line.startswith("event: "):
+                    event_types.append(line.removeprefix("event: "))
+                if line.startswith("event: run_completed"):
+                    break
+
+    assert "plan_created" in event_types
+    assert "finished" in event_types
+    assert event_types[-1] == "run_completed"
+
+
+async def test_stream_unknown_run_returns_404(client):
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        resp = await http.get("/api/agent/does-not-exist/stream")
+    assert resp.status_code == 404

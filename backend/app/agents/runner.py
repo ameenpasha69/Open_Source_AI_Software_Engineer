@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import json
 import logging
@@ -54,15 +55,36 @@ class AgentRunner:
         self._planner = Planner(llm)
         self._max_iterations = max_iterations
 
-    async def run(self, repository_id: str, task: str) -> AgentState:
+    def create_run(self, repository_id: str, task: str) -> AgentRun:
+        """Creates and commits the AgentRun row synchronously, before any LLM
+        call — so a caller (the API route) has a real run_id to return to the
+        client immediately, whether or not `execute()` then runs inline or is
+        handed off to a background task."""
         repository = self._session.get(Repository, repository_id)
         if repository is None:
             raise RepositoryNotFoundError(f"Repository '{repository_id}' not found")
-
         run_row = AgentRun(repository_id=repository_id, task=task, status=AgentStatus.RUNNING.value)
         self._session.add(run_row)
-        self._session.flush()
-        state = AgentState(run_id=run_row.id, task=task, repository_id=repository_id)
+        self._session.commit()
+        return run_row
+
+    async def run(self, repository_id: str, task: str) -> AgentState:
+        """Create the run and execute it inline, end to end. Used directly by
+        tests and by any caller that wants to simply await the whole thing."""
+        run_row = self.create_run(repository_id, task)
+        return await self.execute(run_row.id, repository_id, task)
+
+    async def execute(self, run_id: str, repository_id: str, task: str) -> AgentState:
+        """Runs the loop for an already-created AgentRun row. Cancellation
+        (asyncio.CancelledError, raised into this coroutine by the caller
+        cancelling the asyncio.Task it's running in) is caught so the run's
+        final status is persisted as "cancelled" instead of leaving the row
+        stuck at "running" forever — then re-raised, since the task really
+        is being cancelled and callers awaiting it need to see that.
+        """
+        run_row = self._session.get(AgentRun, run_id)
+        repository = self._session.get(Repository, repository_id)
+        state = AgentState(run_id=run_id, task=task, repository_id=repository_id)
 
         try:
             state.plan = await self._planner.create_plan(task, repository.name)
@@ -76,6 +98,10 @@ class AgentRunner:
                     break
                 await self._run_iteration(run_row, state)
                 self._session.commit()
+        except asyncio.CancelledError:
+            state.status = AgentStatus.CANCELLED
+            self._persist_final(run_row, state)
+            raise
         except LLMProviderError as exc:
             state.status = AgentStatus.FAILED
             state.error = f"LLM error: {exc}"
