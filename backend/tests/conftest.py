@@ -1,8 +1,13 @@
 import hashlib
 
 import pytest
+from app.config.settings import Settings, get_settings
+from app.database.session import create_sqlite_engine, get_db_session, get_session_factory
 from app.embeddings.base import EmbeddingProvider
+from app.embeddings.factory import get_embedding_provider
 from app.llm.base import LLMProvider, LLMResponse, Message
+from app.main import app
+from httpx import ASGITransport
 
 
 class FakeLLMProvider(LLMProvider):
@@ -70,3 +75,34 @@ class FakeEmbeddingProvider(EmbeddingProvider):
 @pytest.fixture
 def fake_embedding_provider() -> FakeEmbeddingProvider:
     return FakeEmbeddingProvider()
+
+
+@pytest.fixture
+def client(tmp_path, fake_embedding_provider):
+    """An ASGITransport for the FastAPI app with DB, embedding provider, and
+    settings (data_dir) overridden to point at an isolated tmp_path — no
+    live Ollama server or real project data touched by tests."""
+    engine = create_sqlite_engine(f"sqlite:///{tmp_path / 'test.db'}")
+    session_factory = get_session_factory(engine)
+    test_settings = Settings(_env_file=None, data_dir=tmp_path / "data")
+
+    def override_get_db_session():
+        session = session_factory()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    app.dependency_overrides[get_db_session] = override_get_db_session
+    app.dependency_overrides[get_embedding_provider] = lambda: fake_embedding_provider
+    app.dependency_overrides[get_settings] = lambda: test_settings
+    yield ASGITransport(app=app)
+    app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def sample_repo(tmp_path):
+    repo = tmp_path / "sample_repo"
+    repo.mkdir()
+    (repo / "main.py").write_text("def entrypoint():\n    pass\n")
+    return repo

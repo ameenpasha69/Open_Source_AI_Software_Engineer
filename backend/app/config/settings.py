@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     # Files larger than this are skipped entirely (binary blobs, generated assets, etc.)
     max_indexable_file_size_bytes: int = 1_000_000
 
+    # --- Search ---
+    search_default_top_k: int = 10
+    # Off by default: raw vector similarity is already a reasonable baseline, and
+    # this needs to be comparable on/off for retrieval-quality experiments. Can
+    # also be overridden per-request via SearchRequest.rerank.
+    search_reranking_enabled: bool = False
+
     @property
     def database_url(self) -> str:
         return f"sqlite:///{self.data_dir / 'app.db'}"

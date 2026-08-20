@@ -1,37 +1,4 @@
-import pytest
-from app.config.settings import Settings, get_settings
-from app.database.session import create_sqlite_engine, get_db_session, get_session_factory
-from app.embeddings.factory import get_embedding_provider
-from app.main import app
-from httpx import ASGITransport, AsyncClient
-
-
-@pytest.fixture
-def client(tmp_path, fake_embedding_provider):
-    engine = create_sqlite_engine(f"sqlite:///{tmp_path / 'test.db'}")
-    session_factory = get_session_factory(engine)
-    test_settings = Settings(_env_file=None, data_dir=tmp_path / "data")
-
-    def override_get_db_session():
-        session = session_factory()
-        try:
-            yield session
-        finally:
-            session.close()
-
-    app.dependency_overrides[get_db_session] = override_get_db_session
-    app.dependency_overrides[get_embedding_provider] = lambda: fake_embedding_provider
-    app.dependency_overrides[get_settings] = lambda: test_settings
-    yield ASGITransport(app=app)
-    app.dependency_overrides.clear()
-
-
-@pytest.fixture
-def sample_repo(tmp_path):
-    repo = tmp_path / "sample_repo"
-    repo.mkdir()
-    (repo / "main.py").write_text("def entrypoint():\n    pass\n")
-    return repo
+from httpx import AsyncClient
 
 
 async def test_index_repository_endpoint(client, sample_repo):

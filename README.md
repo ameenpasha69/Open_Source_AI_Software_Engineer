@@ -16,6 +16,7 @@ This project is being built incrementally, one milestone at a time (see
 - ✅ **Milestone 1** — Local LLM provider abstraction (Ollama backend) + FastAPI health endpoint
 - ✅ **Milestone 2** — Repository indexing + language-aware chunking
 - ✅ **Milestone 3** — Local embeddings + FAISS vector search
+- ✅ **Milestone 4** — Code retrieval API (`POST /api/search`)
 
 Everything below this line describes what exists *today*, not the end goal.
 The full architecture (agent loop, retrieval, tool system, evaluation
@@ -104,17 +105,51 @@ pulled or the server is down, indexing still succeeds and the response's
 `embedding.error` reports what went wrong — you don't lose the chunking work.
 
 `EmbeddingPipeline.search(repository_id, query_text, top_k)` embeds the query
-and returns ranked chunks — this is the retrieval engine; `POST /api/search`
-(Milestone 4) will be the HTTP surface for it, plus source-location
-formatting and optional reranking. Verified live against this repository's
-own `backend/`:
+and returns ranked chunks — this is the retrieval engine underneath
+`POST /api/search`, below.
 
-```text
-query: "walk a repository and split files into chunks"
-  0.730  app/retrieval/indexer.py:19-20
-  0.680  app/retrieval/file_walker.py:68-91  walk_repository
-  0.661  app/retrieval/chunker.py:14-24      Chunker
+## Code retrieval API
+
+```bash
+curl -X POST http://localhost:8000/api/search \
+  -H "Content-Type: application/json" \
+  -d '{"repository_id": "<id>", "query": "remove a vector from the FAISS index when its file is deleted", "top_k": 5}'
 ```
+
+```json
+{
+  "query": "remove a vector from the FAISS index when its file is deleted",
+  "repository_id": "8407f954003e4488869678a9cb976a9f",
+  "reranking_applied": false,
+  "results": [
+    {
+      "file_path": "app/retrieval/embedding_pipeline.py",
+      "symbol": null,
+      "location": "app/retrieval/embedding_pipeline.py:18-23",
+      "score": 0.702,
+      "content": "..."
+    }
+  ]
+}
+```
+
+Verified live against this repository's own `backend/` (above is the actual
+top hit for that query — the docstring explaining exactly that mechanism).
+Each result carries a `location` field (`file_path:start_line-end_line`) so
+results are directly citeable, per the project's source-location convention.
+
+**Validation**: `top_k` is bounded (`1`–`100`, HTTP 422 outside that range);
+an unknown `repository_id` returns 404 rather than an empty result set, so a
+typo'd repository id fails loudly instead of silently returning nothing.
+
+**Reranking** (`app/retrieval/reranker.py`) is optional and off by default
+(`SEARCH_RERANKING_ENABLED=false`), overridable per-request via
+`{"rerank": true}` for evaluation-framework experiments without a server
+restart. The current `KeywordOverlapReranker` is a cheap, explainable signal
+— it blends vector similarity with lexical overlap between the query and each
+chunk's symbol/file path, so a query mentioning an exact identifier is
+guaranteed to favor a chunk actually named that, without needing a
+cross-encoder model. A `NoopReranker` (identity) is the default.
 
 ## Hardware / model defaults
 
@@ -212,12 +247,11 @@ docs/
 
 - Only Ollama is implemented as an LLM/embedding provider; the interfaces
   support others but none are built yet.
-- No agent or tool system exists yet. There's also no HTTP search endpoint
-  yet — `EmbeddingPipeline.search()` works today, but it's called directly
-  from Python, not over HTTP (that's Milestone 4).
-- No reranking — results are raw vector-similarity order. The retrieval
-  pipeline diagram this project targets treats reranking as optional, and
-  it isn't built yet.
+- No agent or tool system exists yet — search is a standalone API, not
+  something an agent calls autonomously as part of investigating an issue.
+- Reranking is a simple lexical-overlap heuristic, not a cross-encoder model
+  — it corrects obvious cases (exact identifier match) but isn't a learned
+  relevance model.
 - The FAISS index is a flat (exact) index, rebuilt in-place per repository.
   Fine at the scale a single local repository produces; would need an
   approximate index (IVF/HNSW) to scale to millions of chunks.
