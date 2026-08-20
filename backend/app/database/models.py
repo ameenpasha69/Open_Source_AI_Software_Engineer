@@ -113,12 +113,17 @@ class AgentRun(Base):
     final_answer: Mapped[str | None] = mapped_column(Text)
     root_cause: Mapped[str | None] = mapped_column(Text)
     iteration_count: Mapped[int] = mapped_column(Integer, default=0)
+    # "not_applicable" (no files modified) or "unverified" (modified, but no
+    # test run exists yet to confirm the fix — Milestone 8 adds VERIFIED /
+    # PARTIALLY_VERIFIED / FAILED once run_tests exists).
+    verification_status: Mapped[str] = mapped_column(String(32), default="not_applicable")
     started_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
 
     events: Mapped[list["AgentEvent"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     tool_calls: Mapped[list["AgentToolCall"]] = relationship(back_populates="run", cascade="all, delete-orphan")
+    modified_files: Mapped[list["ModifiedFile"]] = relationship(back_populates="run", cascade="all, delete-orphan")
 
 
 class AgentEvent(Base):
@@ -157,3 +162,23 @@ class AgentToolCall(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     run: Mapped[AgentRun] = relationship(back_populates="tool_calls")
+
+
+class ModifiedFile(Base):
+    """One successful apply_patch call — the per-file diff, kept independent
+    of whether the target repository is even git-tracked, so
+    GET /api/agent/{run_id}/diff doesn't depend on git.
+    """
+
+    __tablename__ = "modified_files"
+    __table_args__ = (Index("ix_modified_files_run_id", "run_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    run_id: Mapped[str] = mapped_column(ForeignKey("agent_runs.id"))
+    relative_path: Mapped[str] = mapped_column(String(1024))
+    diff: Mapped[str] = mapped_column(Text)
+    lines_added: Mapped[int] = mapped_column(Integer, default=0)
+    lines_removed: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    run: Mapped[AgentRun] = relationship(back_populates="modified_files")

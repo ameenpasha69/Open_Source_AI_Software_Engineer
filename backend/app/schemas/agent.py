@@ -18,6 +18,8 @@ class AgentRunSummary(BaseModel):
     final_answer: str | None
     root_cause: str | None
     iteration_count: int
+    modified_files: list[str]
+    verification_status: str
     started_at: datetime.datetime
     finished_at: datetime.datetime | None
     error: str | None
@@ -28,3 +30,16 @@ class AgentEventOut(BaseModel):
     event_type: str
     payload: dict[str, Any]
     created_at: datetime.datetime
+
+
+class ModifiedFileOut(BaseModel):
+    path: str
+    diff: str
+    lines_added: int
+    lines_removed: int
+
+
+class AgentDiffResponse(BaseModel):
+    run_id: str
+    verification_status: str
+    modified_files: list[ModifiedFileOut]

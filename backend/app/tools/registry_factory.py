@@ -6,6 +6,7 @@ from app.tools.base import ToolRegistry
 from app.tools.code_search_tools import FindReferencesTool, FindSymbolTool, SearchCodeTool
 from app.tools.file_tools import GetFileContextTool, ListFilesTool, ReadFileTool
 from app.tools.git_tools import GetGitDiffTool, GetGitLogTool, GetGitStatusTool
+from app.tools.patch_tools import ApplyPatchTool
 
 
 def build_tool_registry(session: Session, settings: Settings, embedding_provider: EmbeddingProvider) -> ToolRegistry:
@@ -24,4 +25,5 @@ def build_tool_registry(session: Session, settings: Settings, embedding_provider
     registry.register(GetGitStatusTool(session))
     registry.register(GetGitDiffTool(session))
     registry.register(GetGitLogTool(session))
+    registry.register(ApplyPatchTool(session))
     return registry

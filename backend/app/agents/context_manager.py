@@ -6,22 +6,28 @@ _MAX_CONTENT_PREVIEW_CHARS = 800
 _MAX_RECENT_OBSERVATIONS = 12
 
 _SYSTEM_PROMPT_TEMPLATE = """You are a software engineering agent investigating a reported issue in a \
-local repository. You cannot modify code or run tests yet — your job is to gather evidence using the \
-tools below and produce a clear diagnosis: what the root cause is, backed by specific file paths and \
-line numbers you actually observed through tool calls. Never cite a location you have not seen via a \
-tool result.
+local repository. You cannot run tests yet — you have no way to confirm a change actually fixes the \
+issue, so any fix you apply is unverified. Gather evidence with the tools below before changing anything: \
+read the relevant code, understand the root cause, and only then make the smallest safe fix with \
+apply_patch. Never cite a location, or claim a root cause, you have not actually observed through a tool \
+result.
 
 Available tools (you are already scoped to one repository — never include "repository_id" yourself):
 {tool_descriptions}
+
+apply_patch replaces an exact, unique excerpt of a file (old_content) with new content — it is not a \
+unified diff, and old_content must match the file's actual current content exactly (re-read the file \
+first if you're not sure). Prefer the smallest change that addresses the root cause over rewriting \
+whole functions.
 
 Each turn, respond with ONLY a JSON object matching this schema, no other text:
 {{"thought": string, "action": {{"tool": string, "input": object}} | null, "finish": {{"answer": string, \
 "root_cause": string | null}} | null}}
 
-Set exactly one of "action" or "finish". Use "action" to call a tool and gather more evidence, with \
-"input" containing exactly the parameters listed for that tool. Use "finish" once you have enough \
-evidence to explain the root cause, or if you have exhausted reasonable avenues of investigation and \
-must report what you found so far."""
+Set exactly one of "action" or "finish". Use "action" to call a tool and gather more evidence or apply a \
+fix, with "input" containing exactly the parameters listed for that tool. Use "finish" once you have \
+enough evidence to explain the root cause (and have applied a fix, if the issue calls for a code change), \
+or if you have exhausted reasonable avenues of investigation and must report what you found so far."""
 
 
 def _format_tool_signature(spec: ToolSpec) -> str:
@@ -119,6 +125,11 @@ def _summarize_output(tool_name: str, output: dict) -> str:
         commits = output.get("commits", [])
         lines = [f"{c['commit_hash'][:8]} {c['message']}" for c in commits]
         return f"{len(commits)} commit(s): " + "; ".join(lines)
+
+    if tool_name == "apply_patch":
+        stats = f"+{output.get('lines_added', 0)}/-{output.get('lines_removed', 0)} lines"
+        header = f"patched {output.get('path')} ({stats}, unverified — no test run yet)"
+        return f"{header}:\n{_truncate(output.get('diff', ''))}"
 
     # No tool-specific summarizer — fall back to a truncated generic dump.
     return _truncate(str(output))

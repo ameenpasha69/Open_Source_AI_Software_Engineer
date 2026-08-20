@@ -9,7 +9,7 @@ from app.agents.context_manager import ContextManager, format_observation
 from app.agents.planner import Planner
 from app.agents.state import AgentAction, AgentDecision, AgentState, AgentStatus, ToolCallRecord
 from app.agents.termination import check_termination
-from app.database.models import AgentEvent, AgentRun, AgentToolCall, Repository
+from app.database.models import AgentEvent, AgentRun, AgentToolCall, ModifiedFile, Repository
 from app.llm.base import LLMProvider, Message
 from app.llm.exceptions import LLMProviderError
 from app.retrieval.indexer import RepositoryNotFoundError
@@ -24,9 +24,9 @@ class AgentRunner:
     """The basic agent loop: TASK -> PLAN -> (OBSERVE -> SELECT TOOL ->
     EXECUTE -> UPDATE STATE)* -> DONE, persisted incrementally to SQLite so
     a run survives a process restart and is inspectable mid-flight via the
-    API. This milestone's agent investigates and diagnoses — it can't modify
-    code or run tests yet (Milestones 7/8 add those tools), so "DONE" here
-    means "produced a cited diagnosis," not "fixed the bug."
+    API. The agent can now modify code via apply_patch, but it still can't
+    run tests (Milestone 8 adds that) — so a modification is always at most
+    "unverified," never confirmed to actually fix anything.
     """
 
     def __init__(self, session: Session, llm: LLMProvider, tool_registry: ToolRegistry, max_iterations: int):
@@ -108,8 +108,23 @@ class AgentRunner:
         state.observations.append(format_observation(record))
         self._persist_tool_call(run_row.id, record)
 
+        if action.tool == "apply_patch" and result.success:
+            self._record_modified_file(run_row.id, state, result.output)
+
         self._emit_event(
             run_row.id, state.iteration, "tool_completed", {"tool": action.tool, "success": result.success}
+        )
+
+    def _record_modified_file(self, run_id: str, state: AgentState, output: dict) -> None:
+        state.modified_files.append(output["path"])
+        self._session.add(
+            ModifiedFile(
+                run_id=run_id,
+                relative_path=output["path"],
+                diff=output["diff"],
+                lines_added=output["lines_added"],
+                lines_removed=output["lines_removed"],
+            )
         )
 
     async def _get_decision(self, messages: list[Message]) -> AgentDecision | None:
@@ -155,6 +170,7 @@ class AgentRunner:
         run_row.final_answer = state.final_answer
         run_row.root_cause = state.root_cause
         run_row.iteration_count = state.iteration
+        run_row.verification_status = state.verification_status
         run_row.error = state.error
         run_row.finished_at = datetime.datetime.now(datetime.UTC)
         self._session.add(run_row)

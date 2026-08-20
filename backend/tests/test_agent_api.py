@@ -86,3 +86,66 @@ async def test_get_events_for_unknown_run_returns_404(client):
     async with AsyncClient(transport=client, base_url="http://test") as http:
         resp = await http.get("/api/agent/does-not-exist/events")
     assert resp.status_code == 404
+
+
+_APPLY_PATCH_ACTION = (
+    '{"thought": "fix entrypoint", "action": {"tool": "apply_patch", '
+    '"input": {"path": "main.py", "old_content": "def entrypoint():\\n    pass", '
+    '"new_content": "def entrypoint():\\n    return 1"}}, "finish": null}'
+)
+_FINISH_AFTER_PATCH = (
+    '{"thought": "done", "action": null, "finish": {"answer": "fixed it", "root_cause": "did nothing"}}'
+)
+
+
+async def test_run_agent_with_patch_reports_modified_files_and_verification_status(client, sample_repo):
+    repository_id = await _index(client, sample_repo)
+    _use_scripted_llm([_PLAN_RESPONSE, _APPLY_PATCH_ACTION, _FINISH_AFTER_PATCH])
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["modified_files"] == ["main.py"]
+    assert body["verification_status"] == "unverified"
+
+
+async def test_get_agent_run_diff_returns_per_file_diffs(client, sample_repo):
+    repository_id = await _index(client, sample_repo)
+    _use_scripted_llm([_PLAN_RESPONSE, _APPLY_PATCH_ACTION, _FINISH_AFTER_PATCH])
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
+        run_id = run_resp.json()["id"]
+
+        diff_resp = await http.get(f"/api/agent/{run_id}/diff")
+
+    assert diff_resp.status_code == 200
+    body = diff_resp.json()
+    assert body["verification_status"] == "unverified"
+    assert len(body["modified_files"]) == 1
+    assert body["modified_files"][0]["path"] == "main.py"
+    assert "+    return 1" in body["modified_files"][0]["diff"]
+
+
+async def test_get_agent_run_diff_empty_when_no_modifications(client, sample_repo):
+    repository_id = await _index(client, sample_repo)
+    _use_scripted_llm([_PLAN_RESPONSE, _FINISH_RESPONSE])
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
+        run_id = run_resp.json()["id"]
+
+        diff_resp = await http.get(f"/api/agent/{run_id}/diff")
+
+    assert diff_resp.status_code == 200
+    body = diff_resp.json()
+    assert body["verification_status"] == "not_applicable"
+    assert body["modified_files"] == []
+
+
+async def test_get_diff_for_unknown_run_returns_404(client):
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        resp = await http.get("/api/agent/does-not-exist/diff")
+    assert resp.status_code == 404

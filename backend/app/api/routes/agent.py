@@ -13,7 +13,13 @@ from app.embeddings.factory import get_embedding_provider
 from app.llm.base import LLMProvider
 from app.llm.factory import get_llm_provider
 from app.retrieval.indexer import RepositoryNotFoundError
-from app.schemas.agent import AgentEventOut, AgentRunSummary, RunAgentRequest
+from app.schemas.agent import (
+    AgentDiffResponse,
+    AgentEventOut,
+    AgentRunSummary,
+    ModifiedFileOut,
+    RunAgentRequest,
+)
 from app.tools.registry_factory import build_tool_registry
 
 router = APIRouter(tags=["agent"])
@@ -73,6 +79,23 @@ async def get_agent_run_events(run_id: str, session: Session = Depends(get_db_se
     ]
 
 
+@router.get("/agent/{run_id}/diff", response_model=AgentDiffResponse)
+async def get_agent_run_diff(run_id: str, session: Session = Depends(get_db_session)) -> AgentDiffResponse:
+    run_row = session.get(AgentRun, run_id)
+    if run_row is None:
+        raise HTTPException(status_code=404, detail=f"Agent run '{run_id}' not found")
+    return AgentDiffResponse(
+        run_id=run_id,
+        verification_status=run_row.verification_status,
+        modified_files=[
+            ModifiedFileOut(
+                path=m.relative_path, diff=m.diff, lines_added=m.lines_added, lines_removed=m.lines_removed
+            )
+            for m in run_row.modified_files
+        ],
+    )
+
+
 def _to_summary(run_row: AgentRun) -> AgentRunSummary:
     return AgentRunSummary(
         id=run_row.id,
@@ -83,6 +106,8 @@ def _to_summary(run_row: AgentRun) -> AgentRunSummary:
         final_answer=run_row.final_answer,
         root_cause=run_row.root_cause,
         iteration_count=run_row.iteration_count,
+        modified_files=[m.relative_path for m in run_row.modified_files],
+        verification_status=run_row.verification_status,
         started_at=run_row.started_at,
         finished_at=run_row.finished_at,
         error=run_row.error,

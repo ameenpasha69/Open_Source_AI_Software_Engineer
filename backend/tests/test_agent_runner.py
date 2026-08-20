@@ -3,12 +3,13 @@ import json
 import pytest
 from app.agents.runner import AgentRunner
 from app.agents.state import AgentStatus
-from app.database.models import AgentEvent, AgentRun, AgentToolCall
+from app.database.models import AgentEvent, AgentRun, AgentToolCall, ModifiedFile
 from app.llm.exceptions import LLMConnectionError
 from app.retrieval.indexer import RepositoryIndexer, RepositoryNotFoundError
 from app.tools.base import ToolRegistry
 from app.tools.code_search_tools import FindSymbolTool
 from app.tools.file_tools import ReadFileTool
+from app.tools.patch_tools import ApplyPatchTool
 from sqlalchemy import select
 
 from tests.conftest import FakeLLMProvider
@@ -27,6 +28,7 @@ def tool_registry(db_session):
     registry = ToolRegistry()
     registry.register(FindSymbolTool(db_session))
     registry.register(ReadFileTool(db_session, max_file_size_bytes=1_000_000))
+    registry.register(ApplyPatchTool(db_session))
     return registry
 
 
@@ -135,6 +137,62 @@ async def test_agent_run_persists_run_events_and_tool_calls(db_session, indexed_
     assert tool_calls[0].tool_name == "find_symbol"
     assert tool_calls[0].success is True
     assert json.loads(tool_calls[0].input_json) == {"symbol": "entrypoint"}
+
+
+_APPLY_PATCH_ACTION = (
+    '{"thought": "fix entrypoint", "action": {"tool": "apply_patch", '
+    '"input": {"path": "main.py", "old_content": "def entrypoint():\\n    pass", '
+    '"new_content": "def entrypoint():\\n    return 1"}}, "finish": null}'
+)
+_FINISH_AFTER_PATCH = (
+    '{"thought": "done", "action": null, '
+    '"finish": {"answer": "fixed entrypoint to return 1", "root_cause": "it did nothing before"}}'
+)
+
+
+async def test_agent_applies_patch_and_tracks_modified_files(
+    db_session, indexed_repository_id, tool_registry, sample_repo
+):
+    llm = FakeLLMProvider(responses=[_PLAN_RESPONSE, _APPLY_PATCH_ACTION, _FINISH_AFTER_PATCH])
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=5)
+
+    state = await runner.run(indexed_repository_id, "entrypoint does nothing, it should return 1")
+
+    assert state.status == AgentStatus.DONE
+    assert state.modified_files == ["main.py"]
+    assert state.verification_status == "unverified"
+    assert (sample_repo / "main.py").read_text() == "def entrypoint():\n    return 1\n"
+
+
+async def test_agent_run_persists_modified_files(db_session, indexed_repository_id, tool_registry):
+    llm = FakeLLMProvider(responses=[_PLAN_RESPONSE, _APPLY_PATCH_ACTION, _FINISH_AFTER_PATCH])
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=5)
+
+    state = await runner.run(indexed_repository_id, "task")
+
+    run_row = db_session.get(AgentRun, state.run_id)
+    assert run_row.verification_status == "unverified"
+
+    modified = db_session.scalars(select(ModifiedFile).where(ModifiedFile.run_id == state.run_id)).all()
+    assert len(modified) == 1
+    assert modified[0].relative_path == "main.py"
+    assert modified[0].lines_added == 1
+    assert modified[0].lines_removed == 1
+    assert "+    return 1" in modified[0].diff
+
+
+async def test_agent_run_without_modifications_has_not_applicable_verification(
+    db_session, indexed_repository_id, tool_registry
+):
+    llm = FakeLLMProvider(responses=[_PLAN_RESPONSE, _FIND_SYMBOL_ACTION, _FINISH_RESPONSE])
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=5)
+
+    state = await runner.run(indexed_repository_id, "task")
+
+    assert state.modified_files == []
+    assert state.verification_status == "not_applicable"
+    run_row = db_session.get(AgentRun, state.run_id)
+    assert run_row.verification_status == "not_applicable"
 
 
 async def test_agent_run_persists_failed_status_on_unexpected_error(

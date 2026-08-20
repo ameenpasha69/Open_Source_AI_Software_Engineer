@@ -19,6 +19,7 @@ This project is being built incrementally, one milestone at a time (see
 - ✅ **Milestone 4** — Code retrieval API (`POST /api/search`)
 - ✅ **Milestone 5** — Agent tool registry (read-only investigation tools)
 - ✅ **Milestone 6** — Basic agent loop (investigation and diagnosis)
+- ✅ **Milestone 7** — Code modification (`apply_patch`)
 
 Everything below this line describes what exists *today*, not the end goal.
 The full architecture (agent loop, retrieval, tool system, evaluation
@@ -188,6 +189,7 @@ class Tool(ABC):
 | `get_git_status` | Branch + staged/unstaged/untracked files |
 | `get_git_diff` | Working-tree or staged diff, optionally scoped to a path |
 | `get_git_log` | Recent commit history, optionally scoped to a path |
+| `apply_patch` | Replace an exact, unique excerpt of a file's content (Milestone 7 — see Code modification) |
 
 **Path safety**: every file-path argument is resolved through
 `resolve_safe_path()`, which rejects anything escaping the repository root —
@@ -205,11 +207,14 @@ session's actual uncommitted files, and `find_symbol` for `RepositoryIndexer`
 correctly returned all four of its real methods.
 
 This runner is deliberately minimal today (only fixed git subcommands use
-it). It's the foundation the Milestone 7/8 sandboxing work extends —
+it). It's the foundation the Milestone 8 sandboxing work extends —
 allowlisting, environment isolation, and an optional Docker backend — for
-`run_command`, `run_tests`, and `apply_patch`, which all mutate the
-repository or run arbitrary commands and need a stronger boundary than
-read-only tools do.
+`run_command`, `run_tests`, and `run_linter`/`run_formatter`, which execute
+arbitrary or repo-defined commands and need a stronger boundary than a
+fixed `git` subcommand does. `apply_patch` (Milestone 7, below) turned out
+not to need this at all — it's a filesystem write, not a subprocess, so
+`resolve_safe_path` plus its own denylist (env files, ignored directories)
+is the complete safety story for it.
 
 ## Agent loop
 
@@ -266,6 +271,87 @@ agent's plan and tool sequence were genuinely sensible (`search_code` →
 `read_file` → `find_symbol` → `get_file_context`), every tool call
 succeeded, and it correctly converged on `FaissVectorStore.delete` in
 `vector_store.py` — see Limitations for what it *didn't* do well.
+
+## Code modification
+
+The agent can now change code, via a new `apply_patch` tool
+(`app/tools/patch_tools.py`) and `GET /api/agent/{run_id}/diff`.
+
+**Search-and-replace with context validation, not a unified diff.** Spec
+section 10 asks for "validate the expected surrounding context" before
+patching — I read that as a design constraint, not just a checklist item.
+Small local models are unreliable at producing correct line numbers and hunk
+headers for a real unified diff, but are reasonably good at reproducing a
+short, *exact* excerpt of code they just read. So `apply_patch` takes
+`old_content` (the expected context) and `new_content`, and:
+
+- **Zero matches** → `ToolError`: the expected context wasn't found (the
+  model may be misremembering the file — it's told to re-read it).
+- **More than one match** → `ToolError`: the patch is ambiguous about which
+  occurrence to change; applying the wrong one would be worse than refusing.
+- **Exactly one match** → applied, and a real unified diff (`difflib`) is
+  generated *from the actual before/after content* — not trusted from the
+  model — for the observation, the DB record, and the diff API.
+
+**Protected regardless of repo boundary.** `resolve_safe_path` (Milestone 5)
+guarantees a patch target is inside the repo, but "inside the repo" still
+includes `.env` and `.git/` — `apply_patch` separately refuses env/secret
+filenames and anything under an ignored directory (`.git`, `node_modules`,
+etc.), verified in tests.
+
+**Every modification is recorded independent of the tool call log**: a
+successful `apply_patch` also writes a `ModifiedFile` row (path, diff,
++/- line counts) and appends to `AgentState.modified_files`, so
+`GET /api/agent/{run_id}/diff` doesn't need the target to be a git
+repository at all — it's built entirely from what the agent actually did,
+not from shelling out to `git diff`.
+
+**Always "unverified."** `AgentState.verification_status` is `"unverified"`
+whenever `modified_files` is non-empty, `"not_applicable"` otherwise — there
+is no test-running capability yet (Milestone 8), so a modification can never
+be more than that. This is enforced in code, not just prompted for — the
+field is computed from state, not something the model has to remember to say.
+
+**Verified live, with a real bug**: I wrote a repo with a genuine bug
+(`total = item.price` inside a loop — overwrites instead of accumulates —
+so `calculate_total` returns only the last item's price). Given a task that
+named the file, the agent read it, correctly diagnosed the root cause,
+called `apply_patch`, and the file on disk was correctly fixed to
+`total += item.price`:
+
+```json
+{
+  "status": "done",
+  "final_answer": "The bug in orders.py's calculate_total function has been fixed by changing 'total = item.price' to 'total += item.price'.",
+  "root_cause": "The original code was incorrectly resetting the total price on each iteration instead of accumulating it.",
+  "modified_files": ["orders.py"],
+  "verification_status": "unverified"
+}
+```
+
+```diff
+--- a/orders.py
++++ b/orders.py
+@@ -2,5 +2,5 @@
+     """Sum up the price of every item in the order."""
+     total = 0
+     for item in items:
+-        total = item.price
++        total += item.price
+     return total
+```
+
+A vaguer version of the same task (not naming the file) hit
+`MAX_AGENT_ITERATIONS` without patching anything — even though `search_code`
+and `find_references` had already surfaced the correct file and the exact
+buggy line by iteration 5. I confirmed this by inspecting the actual tool
+output the model had seen (not just its stated reasoning): the correct path
+and the buggy line were right there, and it still spent the next three
+iterations guessing at a `src/orders.py` that doesn't exist instead of using
+`orders.py`, which it had already been shown twice. Same finding as
+Milestone 6, now with `apply_patch` too: this looks like an attention/
+recall limitation under a long agentic loop, not a tooling bug — the tools
+returned exactly the right information both times.
 
 ## Hardware / model defaults
 
@@ -348,7 +434,7 @@ backend/
     database/    # SQLAlchemy models + session management (SQLite)
     embeddings/  # EmbeddingProvider abstraction + Ollama backend
     retrieval/   # repository walker, chunker, FAISS vector store, embedding pipeline
-    tools/       # Tool/ToolRegistry/ToolExecutor + file, code-search, and git tools
+    tools/       # Tool/ToolRegistry/ToolExecutor + file, code-search, git, and patch tools
     execution/   # sandboxed subprocess runner (fixed argv, timeout, output caps)
     api/routes/  # FastAPI routers
     schemas/     # Pydantic request/response models
@@ -365,11 +451,12 @@ docs/
 
 - Only Ollama is implemented as an LLM/embedding provider; the interfaces
   support others but none are built yet.
-- **The agent can investigate but can't act.** No `apply_patch`/`run_command`/
-  `run_tests` tools exist yet (Milestones 7/8), so the agent can only ever
-  produce a diagnosis, never a fix or a verified result.
+- **The agent can act but can't verify.** `apply_patch` exists, but
+  `run_command`/`run_tests` don't yet (Milestone 8), so every modification
+  is permanently "unverified" until then — the agent has no way to confirm
+  a patch actually fixes anything, or even that it didn't break something else.
 - **Small local models under-commit to finishing — and a bigger model isn't
-  automatically the fix.** In live testing on the same task
+  automatically the fix.** In live testing on the same investigation task
   (`qwen2.5-coder:7b`, default), the agent chose sensible tools, every call
   succeeded, and it correctly converged on the real answer
   (`FaissVectorStore.delete` in `vector_store.py`) — but never emitted
@@ -379,12 +466,24 @@ docs/
   fixated on a plausible-but-wrong file (`indexer.py`, which handles SQLite
   chunk deletion, not FAISS vector deletion) and re-read it four times
   without escalating to a different tool, also hitting the iteration limit.
-  One run each isn't a rigorous comparison — see the evaluation framework
-  (Milestone 10) for making this kind of claim properly — but it's a real
-  result I'm not going to paper over: this is weaker self-termination under
-  an open-ended agentic loop, and it isn't obviously solved by model size
-  alone. The provider abstraction makes trying a different model a one-line
-  `.env` change either way.
+  The same pattern showed up again testing `apply_patch` (Milestone 7): given
+  a vague task, the agent had the correct file path and the exact buggy line
+  in its own tool output by iteration 5, and still spent the next three
+  iterations guessing at a nonexistent `src/` path instead of using what it
+  had already been shown — it needed the task to name the file explicitly
+  before it would actually call `apply_patch`. One run each isn't a rigorous
+  comparison — see the evaluation framework (Milestone 10) for making this
+  kind of claim properly — but it's a consistent, real result I'm not going
+  to paper over: this looks like an attention/recall limitation under a long
+  agentic loop, not a tooling bug (the tools returned exactly the right
+  information every time), and it isn't obviously solved by model size alone.
+  The provider abstraction makes trying a different model a one-line `.env`
+  change either way.
+- **`apply_patch` requires an exact, unique text match** — no fuzzy or
+  whitespace-tolerant matching, and it can only edit existing files, not
+  create new ones. If the model's `old_content` doesn't match the file
+  byte-for-byte (e.g. subtly wrong indentation), the patch is rejected
+  rather than guessed at.
 - No background execution, polling, or cancellation — `POST /api/agent/run`
   blocks until the run finishes (it doesn't block *other* requests, since
   the loop is `async`, but there's no way to check progress or cancel a

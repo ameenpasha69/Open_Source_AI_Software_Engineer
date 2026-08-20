@@ -24,6 +24,7 @@ async def test_list_tools_returns_all_registered_tools(client):
         "get_git_status",
         "get_git_diff",
         "get_git_log",
+        "apply_patch",
     }
 
 

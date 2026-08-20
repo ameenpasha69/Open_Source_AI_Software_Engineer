@@ -60,10 +60,17 @@ class AgentState(BaseModel):
     plan: list[str] = []
     observations: list[str] = []
     tool_calls: list[ToolCallRecord] = []
-    modified_files: list[str] = []  # empty until Milestone 7 (apply_patch)
+    modified_files: list[str] = []
     test_results: list[Any] = []  # empty until Milestone 8 (run_tests)
     iteration: int = 0
     status: AgentStatus = AgentStatus.RUNNING
     final_answer: str | None = None
     root_cause: str | None = None
     error: str | None = None
+
+    @property
+    def verification_status(self) -> str:
+        """"unverified" once code has changed — Milestone 8 (run_tests) is
+        what lets this become VERIFIED/PARTIALLY_VERIFIED/FAILED; without a
+        test run, a modification is never more than unverified."""
+        return "unverified" if self.modified_files else "not_applicable"
