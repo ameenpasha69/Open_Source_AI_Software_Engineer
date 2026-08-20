@@ -1,18 +1,8 @@
 import pytest
 from app.database.models import VectorRecord
-from app.database.session import create_sqlite_engine, get_session_factory
 from app.retrieval.embedding_pipeline import EmbeddingPipeline
 from app.retrieval.indexer import RepositoryIndexer
 from sqlalchemy import select
-
-
-@pytest.fixture
-def db_session(tmp_path):
-    engine = create_sqlite_engine(f"sqlite:///{tmp_path / 'test.db'}")
-    session_factory = get_session_factory(engine)
-    session = session_factory()
-    yield session
-    session.close()
 
 
 @pytest.fixture

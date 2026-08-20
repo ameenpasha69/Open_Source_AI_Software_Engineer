@@ -2,6 +2,7 @@ import hashlib
 
 import pytest
 from app.config.settings import Settings, get_settings
+from app.database.models import Repository
 from app.database.session import create_sqlite_engine, get_db_session, get_session_factory
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.factory import get_embedding_provider
@@ -106,3 +107,24 @@ def sample_repo(tmp_path):
     repo.mkdir()
     (repo / "main.py").write_text("def entrypoint():\n    pass\n")
     return repo
+
+
+@pytest.fixture
+def db_session(tmp_path):
+    """A SQLAlchemy session bound to an isolated on-disk SQLite DB — used by
+    tests that exercise the retrieval/tools layer directly (not through HTTP)."""
+    engine = create_sqlite_engine(f"sqlite:///{tmp_path / 'test.db'}")
+    session_factory = get_session_factory(engine)
+    session = session_factory()
+    yield session
+    session.close()
+
+
+@pytest.fixture
+def bare_repository(db_session, sample_repo):
+    """A Repository row pointing at `sample_repo`, with no indexing done —
+    for tools (list_files, read_file, git tools) that only need repo.path."""
+    repository = Repository(name="sample_repo", path=str(sample_repo))
+    db_session.add(repository)
+    db_session.flush()
+    return repository

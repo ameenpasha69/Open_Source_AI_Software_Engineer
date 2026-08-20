@@ -1,18 +1,7 @@
-
 import pytest
 from app.database.models import CodeChunk, IndexedFile, Repository
-from app.database.session import create_sqlite_engine, get_session_factory
 from app.retrieval.indexer import RepositoryIndexer, RepositoryNotFoundError
 from sqlalchemy import select
-
-
-@pytest.fixture
-def db_session(tmp_path):
-    engine = create_sqlite_engine(f"sqlite:///{tmp_path / 'test.db'}")
-    session_factory = get_session_factory(engine)
-    session = session_factory()
-    yield session
-    session.close()
 
 
 @pytest.fixture

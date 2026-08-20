@@ -17,6 +17,7 @@ This project is being built incrementally, one milestone at a time (see
 - ✅ **Milestone 2** — Repository indexing + language-aware chunking
 - ✅ **Milestone 3** — Local embeddings + FAISS vector search
 - ✅ **Milestone 4** — Code retrieval API (`POST /api/search`)
+- ✅ **Milestone 5** — Agent tool registry (read-only investigation tools)
 
 Everything below this line describes what exists *today*, not the end goal.
 The full architecture (agent loop, retrieval, tool system, evaluation
@@ -151,6 +152,64 @@ chunk's symbol/file path, so a query mentioning an exact identifier is
 guaranteed to favor a chunk actually named that, without needing a
 cross-encoder model. A `NoopReranker` (identity) is the default.
 
+## Tool registry
+
+The agent (Milestone 6+) won't get raw shell access — it calls typed tools
+through a registry (`app/tools/`). Every tool declares a name, description,
+a Pydantic input schema, and an output schema; `ToolExecutor` validates input
+against that schema, enforces a per-tool timeout, and converts *every*
+failure mode — bad input, an unknown tool, a timeout, an expected `ToolError`,
+or even an unanticipated exception — into a `ToolResult(success=False, ...)`
+rather than letting it propagate. A misbehaving tool degrades one step of
+agent reasoning; it can't crash the run.
+
+```python
+class Tool(ABC):
+    name: ClassVar[str]
+    description: ClassVar[str]
+    input_schema: ClassVar[type[BaseModel]]
+    output_schema: ClassVar[type[BaseModel]]
+    timeout_seconds: ClassVar[float] = 30.0
+
+    async def run(self, input_data: BaseModel) -> BaseModel: ...
+```
+
+**Available today** (`GET /api/tools`, `POST /api/tools/execute`):
+
+| Tool | What it does |
+|---|---|
+| `list_files` | List a directory (optionally recursive), same ignore rules as indexing |
+| `read_file` | Read a file, optionally a line range |
+| `get_file_context` | Read a window of lines centered on a line number |
+| `search_code` | Semantic search — the same engine behind `POST /api/search` |
+| `find_symbol` | Find where a function/class/method is *defined*, by name |
+| `find_references` | Find where a symbol is *mentioned* (lexical, word-boundary — not a real call-graph) |
+| `get_git_status` | Branch + staged/unstaged/untracked files |
+| `get_git_diff` | Working-tree or staged diff, optionally scoped to a path |
+| `get_git_log` | Recent commit history, optionally scoped to a path |
+
+**Path safety**: every file-path argument is resolved through
+`resolve_safe_path()`, which rejects anything escaping the repository root —
+`../../etc/passwd`, an absolute path elsewhere, a symlink pointing out.
+Verified live: a `read_file` call with `path: "../../../../etc/passwd"`
+against this repository comes back as `{"success": false, "error": "Path
+'../../../../etc/passwd' escapes the repository root"}` — a failed tool
+result, not a crash, not a file read.
+
+**Git tools** run through `app/execution/subprocess_runner.py` — a fixed
+argv list (never a shell string, so there's no injection surface), a hard
+timeout, output truncation, and cwd pinned to the target repo. Verified live
+against this project's own repo: `get_git_status` correctly reported this
+session's actual uncommitted files, and `find_symbol` for `RepositoryIndexer`
+correctly returned all four of its real methods.
+
+This runner is deliberately minimal today (only fixed git subcommands use
+it). It's the foundation the Milestone 7/8 sandboxing work extends —
+allowlisting, environment isolation, and an optional Docker backend — for
+`run_command`, `run_tests`, and `apply_patch`, which all mutate the
+repository or run arbitrary commands and need a stronger boundary than
+read-only tools do.
+
 ## Hardware / model defaults
 
 Defaults were chosen for a machine with 16GB+ RAM and no dedicated GPU
@@ -232,9 +291,11 @@ backend/
     database/    # SQLAlchemy models + session management (SQLite)
     embeddings/  # EmbeddingProvider abstraction + Ollama backend
     retrieval/   # repository walker, chunker, FAISS vector store, embedding pipeline
+    tools/       # Tool/ToolRegistry/ToolExecutor + file, code-search, and git tools
+    execution/   # sandboxed subprocess runner (fixed argv, timeout, output caps)
     api/routes/  # FastAPI routers
     schemas/     # Pydantic request/response models
-    agents/ tools/ execution/
+    agents/
     verification/ evaluation/ models/   # scaffolded, empty — future milestones
   tests/
 scripts/         # setup.sh, start.sh
@@ -247,8 +308,16 @@ docs/
 
 - Only Ollama is implemented as an LLM/embedding provider; the interfaces
   support others but none are built yet.
-- No agent or tool system exists yet — search is a standalone API, not
-  something an agent calls autonomously as part of investigating an issue.
+- No agent loop exists yet — tools are callable individually over HTTP, but
+  nothing decides which tool to call next, or plans/iterates across calls.
+  That's Milestone 6.
+- `find_references` is lexical (word-boundary regex over indexed chunks),
+  not a real cross-reference/call-graph index — it'll find usage sites but
+  doesn't understand scoping, shadowing, or imports.
+- No code-modification or command-execution tools yet (`apply_patch`,
+  `run_command`, `run_tests`, `run_linter`, `run_formatter`) — those need the
+  fuller sandboxing layer (Docker option, allowlisting, env isolation) that
+  Milestones 7/8 build on top of today's minimal subprocess runner.
 - Reranking is a simple lexical-overlap heuristic, not a cross-encoder model
   — it corrects obvious cases (exact identifier match) but isn't a learned
   relevance model.
