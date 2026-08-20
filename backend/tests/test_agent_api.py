@@ -268,3 +268,68 @@ async def test_stream_unknown_run_returns_404(client):
     async with AsyncClient(transport=client, base_url="http://test") as http:
         resp = await http.get("/api/agent/does-not-exist/stream")
     assert resp.status_code == 404
+
+
+async def test_get_agent_run_tests_returns_structured_results(client, tmp_path):
+    calc_repo = tmp_path / "calc_repo"
+    calc_repo.mkdir()
+    (calc_repo / "calc.py").write_text("def add(a, b):\n    return a - b\n")
+    (calc_repo / "test_calc.py").write_text(
+        "from calc import add\n\n\ndef test_add():\n    assert add(1, 2) == 3\n"
+    )
+    repository_id = await _index(client, calc_repo)
+
+    apply_patch_action = (
+        '{"thought": "fix add", "action": {"tool": "apply_patch", '
+        '"input": {"path": "calc.py", "old_content": "return a - b", "new_content": "return a + b"}}, '
+        '"finish": null}'
+    )
+    _use_scripted_llm([_PLAN_RESPONSE, apply_patch_action, _RUN_TESTS_ACTION, _FINISH_VERIFIED])
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        run_resp = await http.post(
+            "/api/agent/run", json={"repository_id": repository_id, "task": "task"}
+        )
+        run_id = run_resp.json()["id"]
+        await wait_for_agent_run(run_id)
+
+        tests_resp = await http.get(f"/api/agent/{run_id}/tests")
+
+    assert tests_resp.status_code == 200
+    body = tests_resp.json()
+    assert len(body) == 1
+    assert body[0]["passed"] is True
+    assert body[0]["scope"] == "full"
+    assert body[0]["command"] == "python3 -m pytest"
+
+
+async def test_get_agent_run_tests_for_unknown_run_returns_404(client):
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        resp = await http.get("/api/agent/does-not-exist/tests")
+    assert resp.status_code == 404
+
+
+async def test_get_agent_run_tool_calls_returns_full_detail(client, sample_repo):
+    repository_id = await _index(client, sample_repo)
+    _use_scripted_llm([_PLAN_RESPONSE, _APPLY_PATCH_ACTION, _FINISH_AFTER_PATCH])
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "task"})
+        run_id = run_resp.json()["id"]
+        await wait_for_agent_run(run_id)
+
+        calls_resp = await http.get(f"/api/agent/{run_id}/tool-calls")
+
+    assert calls_resp.status_code == 200
+    body = calls_resp.json()
+    assert len(body) == 1
+    assert body[0]["tool_name"] == "apply_patch"
+    assert body[0]["success"] is True
+    assert body[0]["output"]["path"] == "main.py"
+    assert "+    return 1" in body[0]["output"]["diff"]
+
+
+async def test_get_agent_run_tool_calls_for_unknown_run_returns_404(client):
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        resp = await http.get("/api/agent/does-not-exist/tool-calls")
+    assert resp.status_code == 404

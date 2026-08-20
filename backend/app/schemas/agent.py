@@ -43,3 +43,28 @@ class AgentDiffResponse(BaseModel):
     run_id: str
     verification_status: str
     modified_files: list[ModifiedFileOut]
+
+
+class TestRunOut(BaseModel):
+    command: str
+    scope: str
+    passed: bool
+    total_tests: int | None
+    passed_tests: int | None
+    failed_tests: list[str]
+    failure_category: str
+    duration_seconds: float
+    stdout: str
+    stderr: str
+    created_at: datetime.datetime
+
+
+class ToolCallOut(BaseModel):
+    iteration: int
+    tool_name: str
+    input: dict[str, Any]
+    success: bool
+    output: dict[str, Any] | None
+    error: str | None
+    duration_seconds: float
+    created_at: datetime.datetime

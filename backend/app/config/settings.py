@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     app_name: str = "local-ai-software-engineer"
     log_level: str = "INFO"
     data_dir: Path = Path("./data")
+    # The Next.js dev server's origin — the only one allowed to call this API
+    # cross-origin. Everything here runs on localhost; this isn't a
+    # public-internet CORS policy, just what a browser-based frontend needs.
+    frontend_origin: str = "http://localhost:3000"
 
     llm_provider: str = "ollama"
     llm_model: str = "qwen2.5-coder:7b"

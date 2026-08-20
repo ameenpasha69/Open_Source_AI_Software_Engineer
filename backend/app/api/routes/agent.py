@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.agents.background import BackgroundAgentRunner, get_background_agent_runner
 from app.agents.runner import AgentRunner
 from app.config.settings import Settings, get_settings
-from app.database.models import AgentEvent, AgentRun
+from app.database.models import AgentEvent, AgentRun, AgentToolCall, TestRun
 from app.database.session import get_db_session, get_session_factory_dependency
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.factory import get_embedding_provider
@@ -23,6 +23,8 @@ from app.schemas.agent import (
     AgentRunSummary,
     ModifiedFileOut,
     RunAgentRequest,
+    TestRunOut,
+    ToolCallOut,
 )
 from app.tools.registry_factory import build_tool_registry
 
@@ -197,6 +199,54 @@ async def get_agent_run_diff(run_id: str, session: Session = Depends(get_db_sess
             for m in run_row.modified_files
         ],
     )
+
+
+@router.get("/agent/{run_id}/tests", response_model=list[TestRunOut])
+async def get_agent_run_tests(run_id: str, session: Session = Depends(get_db_session)) -> list[TestRunOut]:
+    if session.get(AgentRun, run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Agent run '{run_id}' not found")
+    rows = session.scalars(select(TestRun).where(TestRun.run_id == run_id).order_by(TestRun.created_at)).all()
+    return [
+        TestRunOut(
+            command=r.command,
+            scope=r.scope,
+            passed=r.passed,
+            total_tests=r.total_tests,
+            passed_tests=r.passed_tests,
+            failed_tests=json.loads(r.failed_tests_json),
+            failure_category=r.failure_category,
+            duration_seconds=r.duration_seconds,
+            stdout=r.stdout,
+            stderr=r.stderr,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
+
+
+@router.get("/agent/{run_id}/tool-calls", response_model=list[ToolCallOut])
+async def get_agent_run_tool_calls(run_id: str, session: Session = Depends(get_db_session)) -> list[ToolCallOut]:
+    """Full per-call detail (arguments, output) — the source for the UI's
+    Code panel (search/read results the agent retrieved) and a richer audit
+    trail than /events, whose payloads are deliberately compact."""
+    if session.get(AgentRun, run_id) is None:
+        raise HTTPException(status_code=404, detail=f"Agent run '{run_id}' not found")
+    rows = session.scalars(
+        select(AgentToolCall).where(AgentToolCall.run_id == run_id).order_by(AgentToolCall.created_at)
+    ).all()
+    return [
+        ToolCallOut(
+            iteration=r.iteration,
+            tool_name=r.tool_name,
+            input=json.loads(r.input_json),
+            success=r.success,
+            output=json.loads(r.output_json) if r.output_json else None,
+            error=r.error,
+            duration_seconds=r.duration_seconds,
+            created_at=r.created_at,
+        )
+        for r in rows
+    ]
 
 
 def _to_event_out(event: AgentEvent) -> AgentEventOut:
