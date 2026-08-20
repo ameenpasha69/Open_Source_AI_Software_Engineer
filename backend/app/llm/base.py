@@ -34,8 +34,17 @@ class LLMProvider(ABC):
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        json_mode: bool = False,
     ) -> LLMResponse:
-        """Run a single non-streaming chat completion."""
+        """Run a single non-streaming chat completion.
+
+        `json_mode` constrains decoding to valid JSON where the backend
+        supports it (Ollama's `format: "json"`) — this is what the agent
+        loop uses for reliable structured tool selection with local models
+        that don't consistently populate a native tool_calls field. It only
+        guarantees syntactically valid JSON, not schema conformance — callers
+        still validate the parsed result against their own Pydantic model.
+        """
 
     @abstractmethod
     def stream(

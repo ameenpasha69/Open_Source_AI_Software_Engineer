@@ -74,3 +74,39 @@ async def test_ollama_provider_health_check_false_when_unreachable():
         default_temperature=0.2,
     )
     assert await provider.health_check() is False
+
+
+async def test_ollama_provider_json_mode_sets_format_field(monkeypatch):
+    provider = OllamaProvider(
+        base_url="http://localhost:11434", model="qwen2.5-coder:7b", timeout_seconds=1.0, default_temperature=0.2
+    )
+    captured = {}
+
+    async def fake_post(self, url, json):
+        captured.update(json)
+        return httpx.Response(
+            200, json={"message": {"content": "{}"}, "done_reason": "stop"}, request=httpx.Request("POST", url)
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    await provider.generate([Message(role="user", content="hi")], json_mode=True)
+    assert captured["format"] == "json"
+
+
+async def test_ollama_provider_default_mode_omits_format_field(monkeypatch):
+    provider = OllamaProvider(
+        base_url="http://localhost:11434", model="qwen2.5-coder:7b", timeout_seconds=1.0, default_temperature=0.2
+    )
+    captured = {}
+
+    async def fake_post(self, url, json):
+        captured.update(json)
+        return httpx.Response(
+            200, json={"message": {"content": "hi"}, "done_reason": "stop"}, request=httpx.Request("POST", url)
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    await provider.generate([Message(role="user", content="hi")])
+    assert "format" not in captured

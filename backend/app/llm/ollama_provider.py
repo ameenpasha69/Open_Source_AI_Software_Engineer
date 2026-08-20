@@ -27,8 +27,9 @@ class OllamaProvider(LLMProvider):
         *,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        json_mode: bool = False,
     ) -> LLMResponse:
-        payload = self._build_payload(messages, temperature, max_tokens, stream=False)
+        payload = self._build_payload(messages, temperature, max_tokens, stream=False, json_mode=json_mode)
         started = time.monotonic()
         try:
             async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -106,13 +107,17 @@ class OllamaProvider(LLMProvider):
         temperature: float | None,
         max_tokens: int | None,
         stream: bool,
+        json_mode: bool = False,
     ) -> dict:
         options: dict = {"temperature": temperature if temperature is not None else self._default_temperature}
         if max_tokens is not None:
             options["num_predict"] = max_tokens
-        return {
+        payload = {
             "model": self._model,
             "messages": [m.model_dump() for m in messages],
             "stream": stream,
             "options": options,
         }
+        if json_mode:
+            payload["format"] = "json"
+        return payload

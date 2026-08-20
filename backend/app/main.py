@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
+from app.api.routes.agent import router as agent_router
 from app.api.routes.health import router as health_router
 from app.api.routes.repositories import router as repositories_router
 from app.api.routes.search import router as search_router
@@ -32,3 +33,4 @@ app.include_router(health_router, prefix="/api")
 app.include_router(repositories_router, prefix="/api")
 app.include_router(search_router, prefix="/api")
 app.include_router(tools_router, prefix="/api")
+app.include_router(agent_router, prefix="/api")

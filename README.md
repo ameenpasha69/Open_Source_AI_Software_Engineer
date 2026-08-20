@@ -18,6 +18,7 @@ This project is being built incrementally, one milestone at a time (see
 - ✅ **Milestone 3** — Local embeddings + FAISS vector search
 - ✅ **Milestone 4** — Code retrieval API (`POST /api/search`)
 - ✅ **Milestone 5** — Agent tool registry (read-only investigation tools)
+- ✅ **Milestone 6** — Basic agent loop (investigation and diagnosis)
 
 Everything below this line describes what exists *today*, not the end goal.
 The full architecture (agent loop, retrieval, tool system, evaluation
@@ -210,6 +211,62 @@ allowlisting, environment isolation, and an optional Docker backend — for
 repository or run arbitrary commands and need a stronger boundary than
 read-only tools do.
 
+## Agent loop
+
+`POST /api/agent/run` is the first version of the actual agent: given a
+repository and a natural-language issue, it plans, then repeatedly decides
+which tool to call, executes it, and updates its state — until it has enough
+evidence to explain the root cause, or it runs out of iterations
+(`MAX_AGENT_ITERATIONS`). It **cannot modify code or run tests yet**
+(Milestones 7/8 add those tools) — "done" here means "produced a cited
+diagnosis," not "fixed the bug."
+
+```text
+TASK → PLAN → (OBSERVE → SELECT TOOL → EXECUTE → UPDATE STATE)* → DONE
+```
+
+**Structured decisions, not native tool-calling.** I tried Ollama's native
+`tools` parameter first — with `qwen2.5-coder:7b` it didn't populate
+`message.tool_calls` at all; the model just echoed JSON into plain `content`
+instead. Rather than depend on that, the agent uses Ollama's `format: "json"`
+constrained decoding (`LLMProvider.generate(..., json_mode=True)`) with an
+explicit schema in the prompt — verified far more reliable in practice. Each
+turn the model returns exactly one of `action` (call a tool) or `finish`
+(stop and answer), validated against a Pydantic model
+(`AgentDecision`) that rejects a response setting both or neither.
+
+**Explicit, structured state, not a raw chat transcript** (`AgentState`):
+`task`, `repository_id`, `plan`, `observations`, `tool_calls`,
+`modified_files` (empty until Milestone 7), `test_results` (empty until
+Milestone 8), `iteration`, `status`. Persisted incrementally to SQLite
+(`agent_runs`, `agent_events`, `tool_calls` tables) after every iteration, so
+a run survives a process restart and is inspectable mid-flight —
+`GET /api/agent/{run_id}` and `GET /api/agent/{run_id}/events`.
+
+**The architecture is composed of named, independently testable pieces**,
+not one large function:
+
+| Component | File | Responsibility |
+|---|---|---|
+| `Planner` | `agents/planner.py` | One LLM call up front → a short investigation plan, with a hardcoded fallback plan if the response doesn't parse |
+| `ContextManager` | `agents/context_manager.py` | Builds each turn's prompt from `AgentState` (not an ever-growing history); caps to the most recent N observations |
+| Observation Handler | `context_manager.format_observation()` | Turns a raw `ToolResult` into a compact, tool-specific summary — this is what actually accumulates in memory, not the full JSON |
+| `check_termination()` | `agents/termination.py` | One inspectable function deciding RUNNING vs. a terminal status — not `if`s scattered through the loop |
+| `AgentRunner` | `agents/runner.py` | Orchestrates the above + `ToolExecutor` + DB persistence |
+
+**repository_id is injected, never LLM-supplied.** Tool input schemas
+require `repository_id` (so `/api/tools/execute` works standalone), but the
+agent always overrides whatever the model puts there with the run's actual
+repository before executing — the model can't accidentally or adversarially
+point a tool call at a different repository than the one it was scoped to.
+
+**Verified live** against this project's own `backend/` with real Ollama —
+asked to find where a FAISS vector is removed when a chunk is deleted, the
+agent's plan and tool sequence were genuinely sensible (`search_code` →
+`read_file` → `find_symbol` → `get_file_context`), every tool call
+succeeded, and it correctly converged on `FaissVectorStore.delete` in
+`vector_store.py` — see Limitations for what it *didn't* do well.
+
 ## Hardware / model defaults
 
 Defaults were chosen for a machine with 16GB+ RAM and no dedicated GPU
@@ -295,7 +352,7 @@ backend/
     execution/   # sandboxed subprocess runner (fixed argv, timeout, output caps)
     api/routes/  # FastAPI routers
     schemas/     # Pydantic request/response models
-    agents/
+    agents/      # AgentRunner, Planner, ContextManager, state, termination logic
     verification/ evaluation/ models/   # scaffolded, empty — future milestones
   tests/
 scripts/         # setup.sh, start.sh
@@ -308,9 +365,33 @@ docs/
 
 - Only Ollama is implemented as an LLM/embedding provider; the interfaces
   support others but none are built yet.
-- No agent loop exists yet — tools are callable individually over HTTP, but
-  nothing decides which tool to call next, or plans/iterates across calls.
-  That's Milestone 6.
+- **The agent can investigate but can't act.** No `apply_patch`/`run_command`/
+  `run_tests` tools exist yet (Milestones 7/8), so the agent can only ever
+  produce a diagnosis, never a fix or a verified result.
+- **Small local models under-commit to finishing — and a bigger model isn't
+  automatically the fix.** In live testing on the same task
+  (`qwen2.5-coder:7b`, default), the agent chose sensible tools, every call
+  succeeded, and it correctly converged on the real answer
+  (`FaissVectorStore.delete` in `vector_store.py`) — but never emitted
+  `finish`, hitting `MAX_AGENT_ITERATIONS` after re-running a couple of
+  near-duplicate searches instead of concluding. I re-ran the identical task
+  against `qwen2.5-coder:14b` expecting better loop closure; instead it
+  fixated on a plausible-but-wrong file (`indexer.py`, which handles SQLite
+  chunk deletion, not FAISS vector deletion) and re-read it four times
+  without escalating to a different tool, also hitting the iteration limit.
+  One run each isn't a rigorous comparison — see the evaluation framework
+  (Milestone 10) for making this kind of claim properly — but it's a real
+  result I'm not going to paper over: this is weaker self-termination under
+  an open-ended agentic loop, and it isn't obviously solved by model size
+  alone. The provider abstraction makes trying a different model a one-line
+  `.env` change either way.
+- No background execution, polling, or cancellation — `POST /api/agent/run`
+  blocks until the run finishes (it doesn't block *other* requests, since
+  the loop is `async`, but there's no way to check progress or cancel a
+  run in flight). That arrives with Milestone 9's streaming work.
+- No re-planning — the initial plan is fixed for the whole run, even if
+  early observations contradict it. The agent still adapts moment-to-moment
+  (each turn sees all prior observations), just not by rewriting the plan.
 - `find_references` is lexical (word-boundary regex over indexed chunks),
   not a real cross-reference/call-graph index — it'll find usage sites but
   doesn't understand scoping, shadowing, or imports.

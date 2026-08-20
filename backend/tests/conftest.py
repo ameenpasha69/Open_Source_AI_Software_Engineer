@@ -12,17 +12,37 @@ from httpx import ASGITransport
 
 
 class FakeLLMProvider(LLMProvider):
-    """Deterministic in-memory LLMProvider for tests — no network, no Ollama."""
+    """Deterministic in-memory LLMProvider for tests — no network, no Ollama.
 
-    def __init__(self, response_text: str = "fake response", reachable: bool = True):
+    Pass `responses` for tests that need a scripted sequence of replies (e.g.
+    driving an agent loop through several iterations) — each call to
+    `generate()` pops the next one. With no `responses`, every call returns
+    `response_text` instead.
+    """
+
+    def __init__(
+        self,
+        response_text: str = "fake response",
+        responses: list[str] | None = None,
+        reachable: bool = True,
+    ):
         self._response_text = response_text
+        self._responses = list(responses) if responses is not None else None
         self._reachable = reachable
         self.received_messages: list[list[Message]] = []
+        self.json_mode_calls: list[bool] = []
 
-    async def generate(self, messages, *, temperature=None, max_tokens=None) -> LLMResponse:
+    async def generate(self, messages, *, temperature=None, max_tokens=None, json_mode=False) -> LLMResponse:
         self.received_messages.append(messages)
+        self.json_mode_calls.append(json_mode)
+        if self._responses is not None:
+            if not self._responses:
+                raise AssertionError("FakeLLMProvider.generate() called more times than scripted responses")
+            content = self._responses.pop(0)
+        else:
+            content = self._response_text
         return LLMResponse(
-            content=self._response_text,
+            content=content,
             model="fake-model",
             prompt_tokens=10,
             completion_tokens=5,
