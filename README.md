@@ -10,8 +10,10 @@ vector databases, no paid services of any kind.
 
 ## Project status
 
-This project is being built incrementally, one milestone at a time (see
-`docs/milestones.md` — added as milestones land). **Currently implemented:**
+This project was built incrementally, one milestone at a time, never moving
+to the next until the current one had real tests and real (non-mocked) live
+verification against Ollama. **All 11 originally scoped milestones are
+implemented:**
 
 - ✅ **Milestone 1** — Local LLM provider abstraction (Ollama backend) + FastAPI health endpoint
 - ✅ **Milestone 2** — Repository indexing + language-aware chunking
@@ -23,11 +25,12 @@ This project is being built incrementally, one milestone at a time (see
 - ✅ **Milestone 8** — Test execution + self-correction
 - ✅ **Milestone 9** — Streaming UI (SSE, background execution, cancellation) + Next.js frontend
 - ✅ **Milestone 10** — Evaluation framework (ground-truth-independent scoring against real Ollama runs)
+- ✅ **Milestone 11** — Observability (structured logs, request/run correlation) + Docker sandboxing hardening
 
-Everything below this line describes what exists *today*, not the end goal.
-The full architecture (agent loop, retrieval, tool system, evaluation
-framework, etc.) is documented as each milestone is built — see the task
-description this project was scoped from for the complete roadmap.
+This is the full 11-milestone roadmap this project was scoped from.
+Everything below describes what's actually implemented and verified, not
+aspirational design — see [Limitations](#limitations-current-milestone) for
+what's honestly still missing or rough within each of these.
 
 ## Why a provider abstraction instead of calling Ollama directly?
 
@@ -601,6 +604,69 @@ enough to prove the scoring logic works and to surface a real,
 reproducible failure mode. The value of the framework is in *repeated* runs
 across models/settings, not this single snapshot.
 
+## Observability and sandboxing
+
+Milestone 11 covers the two things a genuinely autonomous agent needs before
+it's trustworthy to leave running unattended: you can see what it did, and
+what it can do to your machine is bounded.
+
+**Structured logging.** `LOG_FORMAT=json` switches every log line to one
+JSON object per line (`app/observability/logging.py`); `text` (the default)
+stays human-readable for local development. Every log carries a `run_id`
+when it happens inside an agent run and a `request_id` when it happens
+inside an HTTP request — set via `contextvars`, not threaded through every
+function signature, so a tool three calls deep in the agent loop logs with
+the right `run_id` without its caller chain knowing anything about logging.
+`RequestIDMiddleware` assigns (or echoes back an inbound `X-Request-ID`)
+and logs one line per request; `AgentRunner` logs run started/finished/
+cancelled with duration and iteration count; `ToolExecutor` logs every tool
+call's success/failure and duration. None of this replaces the
+already-existing `AgentEvent`/`AgentToolCall`/`TestRun` database rows the
+frontend reads from (Milestone 9) — those are for the UI; this is for
+grepping/aggregating logs outside the app entirely.
+
+Verified live: running the actual server and curling `/api/health` with and
+without an inbound `X-Request-ID` header shows the header both generated and
+echoed correctly, with a matching `"request handled"` JSON log line for
+each. Running the evaluator with `LOG_FORMAT=json` shows the same `run_id`
+tying together the agent's `apply_patch`/`run_tests` tool-call logs and the
+final `"agent run finished"` line.
+
+**Docker sandboxing** (`SANDBOX_BACKEND=docker`, default `subprocess`) runs
+every allowlisted command (`run_tests`, `run_command`, `run_linter`,
+`run_formatter`) inside a throwaway `--rm --network none` container instead
+of a bare subprocess — real filesystem isolation (only the target repo is
+bind-mounted; the subprocess backend can still see the entire host
+filesystem, it just has a restricted environment) and real network
+isolation (the subprocess backend has none — a command that shells out to
+curl would succeed), plus memory/CPU limits (`SANDBOX_DOCKER_MEMORY_LIMIT`,
+`SANDBOX_DOCKER_CPU_LIMIT`). `docker/sandbox.Dockerfile` bakes in pytest,
+ruff, black, flake8, and mypy ahead of time, since `--network none` means
+nothing can be installed once the container starts. `scripts/setup.sh`
+builds the image automatically if Docker is present; nothing about the
+default path requires it.
+
+Two correctness details worth being explicit about, both found by actually
+running it rather than assumed: killing the local `docker run` client
+process on a timeout does **not** stop the container — `dockerd` keeps it
+running independently of its CLI — so each container gets a unique `--name`
+and a timeout triggers a real `docker kill` by name, not just an orphaned
+client process. And `docker run`'s own "the container never started" failure
+(bad image, daemon unreachable) is deliberately distinguished from the
+containerized command's own exit code and raised as `SandboxUnavailableError`
+— silently reporting "the daemon is down" as "the tests exited 1" would be a
+false positive in exactly the case this section is trying to be honest about.
+
+Verified live against a real Ollama-driven agent run: the container ran the
+real fix, `python3 -m pytest` exited `0` inside it, and a probe script
+(`socket.create_connection(("8.8.8.8", 53))`) run the same way failed with
+`Network is unreachable` — the isolation is real, not just configured.
+
+```bash
+docker build -f docker/sandbox.Dockerfile -t local-ai-softeng-sandbox:latest .
+SANDBOX_BACKEND=docker ./scripts/start.sh
+```
+
 ## Hardware / model defaults
 
 Defaults were chosen for a machine with 16GB+ RAM and no dedicated GPU
@@ -686,18 +752,19 @@ backend/
     embeddings/  # EmbeddingProvider abstraction + Ollama backend
     retrieval/   # repository walker, chunker, FAISS vector store, embedding pipeline
     tools/       # Tool/ToolRegistry/ToolExecutor + file, code-search, git, patch, and execution tools
-    execution/   # sandboxed subprocess runner (allowlist, env isolation, timeout, output caps)
+    execution/   # sandboxed subprocess runner — subprocess or Docker backend, allowlist, timeouts, output caps
     api/routes/  # FastAPI routers
     schemas/     # Pydantic request/response models
     agents/      # AgentRunner, Planner, ContextManager, state, termination logic, background execution
     evaluation/  # eval task loader, ground-truth test snapshots, scoring, CLI runner
-    verification/ models/   # scaffolded, empty — future milestones
+    observability/ # structured logging (JSON/text), request/run correlation, request-ID middleware
   tests/
 frontend/
   app/page.tsx       # the whole UI — repository selection, task input, five tabs
   lib/                # typed API client, SSE hook, TypeScript types mirroring the backend schemas
   components/         # one component per panel (Timeline/Code/Diff/Tests/Report)
 scripts/         # setup.sh, start.sh
+docker/          # sandbox.Dockerfile — the image SANDBOX_BACKEND=docker runs commands in
 data/            # local vector index, SQLite DB (gitignored)
 evals/
   tasks/           # fixture repos + task.json definitions, checked in
@@ -719,11 +786,17 @@ docs/
   (SSE), but the other tabs refetch `GET /api/agent/{run_id}/{diff,tests,
   tool-calls}` when a relevant event arrives rather than streaming that
   detail directly, since the SSE payloads are deliberately compact.
-- **No Docker sandboxing yet** — command execution is a local subprocess with
-  an allowlist, environment isolation, and timeouts, which is a real safety
-  boundary but not the same as container isolation. Docker was deliberately
-  scoped out of Milestone 8 (it's fundamentally a hardening concern, not
-  core self-correction functionality) to the dedicated Milestone 11.
+- **Docker sandboxing is opt-in, not the default** — `SANDBOX_BACKEND=docker`
+  gets real network isolation, filesystem containment, and memory/CPU limits
+  (see [Observability and sandboxing](#observability-and-sandboxing)), but
+  the default stays `subprocess` so the project still runs with nothing but
+  Python installed. A user who never sets this env var gets the same safety
+  boundary as before (allowlist + env isolation), not the stronger one.
+- **The sandbox Docker image is Python-only** — `docker/sandbox.Dockerfile`
+  bakes in pytest/ruff/black/flake8/mypy, not node/go/cargo/mvn/gradle
+  (also in `ALLOWED_COMMANDS`), since networking is disabled inside the
+  container so nothing can `pip install`/`npm install` at run time. Those
+  other ecosystems still work under `SANDBOX_BACKEND=subprocess`.
 - **Test/lint/format commands are Python-only auto-detected** — anything else
   needs explicit configuration via `IndexRepositoryRequest`. Guessing wrong
   for other ecosystems would be worse than requiring the user to say so.

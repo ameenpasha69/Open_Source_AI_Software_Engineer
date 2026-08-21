@@ -43,4 +43,12 @@ for MODEL in "$LLM_MODEL" "$EMBEDDING_MODEL"; do
   fi
 done
 
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  echo "==> Building optional Docker sandbox image (local-ai-softeng-sandbox:latest)"
+  docker build -f docker/sandbox.Dockerfile -t local-ai-softeng-sandbox:latest . >/dev/null
+  echo "    Set SANDBOX_BACKEND=docker in .env to use it (default is 'subprocess', no Docker required)."
+else
+  echo "==> Docker not available — skipping sandbox image build. SANDBOX_BACKEND stays 'subprocess' (the default)."
+fi
+
 echo "==> Setup complete. Run ./scripts/start.sh to launch the API."

@@ -1,9 +1,12 @@
 import asyncio
+import logging
 import time
 from abc import ABC, abstractmethod
 from typing import Any, ClassVar
 
 from pydantic import BaseModel, ValidationError
+
+logger = logging.getLogger(__name__)
 
 
 class ToolError(Exception):
@@ -101,15 +104,12 @@ class ToolExecutor:
         except Exception as exc:  # noqa: BLE001 - last-resort safety net, see class docstring
             return self._failure(tool_name, f"Unexpected tool error: {exc}", started)
 
-        return ToolResult(
-            tool_name=tool_name,
-            success=True,
-            output=output.model_dump(),
-            duration_seconds=round(time.monotonic() - started, 3),
-        )
+        duration = round(time.monotonic() - started, 3)
+        logger.info("tool call succeeded", extra={"tool_name": tool_name, "duration_seconds": duration})
+        return ToolResult(tool_name=tool_name, success=True, output=output.model_dump(), duration_seconds=duration)
 
     @staticmethod
     def _failure(tool_name: str, error: str, started: float) -> ToolResult:
-        return ToolResult(
-            tool_name=tool_name, success=False, error=error, duration_seconds=round(time.monotonic() - started, 3)
-        )
+        duration = round(time.monotonic() - started, 3)
+        logger.warning("tool call failed", extra={"tool_name": tool_name, "error": error, "duration_seconds": duration})
+        return ToolResult(tool_name=tool_name, success=False, error=error, duration_seconds=duration)

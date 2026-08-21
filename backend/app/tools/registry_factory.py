@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.config.settings import Settings
 from app.embeddings.base import EmbeddingProvider
+from app.execution.subprocess_runner import SandboxSettings
 from app.tools.base import ToolRegistry
 from app.tools.code_search_tools import FindReferencesTool, FindSymbolTool, SearchCodeTool
 from app.tools.execution_tools import RunCommandTool, RunFormatterTool, RunLinterTool, RunTestsTool
@@ -16,6 +17,12 @@ def build_tool_registry(session: Session, settings: Settings, embedding_provider
     run rather than as a singleton, since the DB session itself is
     request-scoped.
     """
+    sandbox = SandboxSettings(
+        backend=settings.sandbox_backend,
+        docker_image=settings.sandbox_docker_image,
+        docker_memory_limit=settings.sandbox_docker_memory_limit,
+        docker_cpu_limit=settings.sandbox_docker_cpu_limit,
+    )
     registry = ToolRegistry()
     registry.register(ListFilesTool(session))
     registry.register(ReadFileTool(session, settings.max_indexable_file_size_bytes))
@@ -27,8 +34,8 @@ def build_tool_registry(session: Session, settings: Settings, embedding_provider
     registry.register(GetGitDiffTool(session))
     registry.register(GetGitLogTool(session))
     registry.register(ApplyPatchTool(session))
-    registry.register(RunTestsTool(session, settings.test_execution_timeout_seconds))
-    registry.register(RunCommandTool(session))
-    registry.register(RunLinterTool(session))
-    registry.register(RunFormatterTool(session))
+    registry.register(RunTestsTool(session, settings.test_execution_timeout_seconds, sandbox))
+    registry.register(RunCommandTool(session, sandbox))
+    registry.register(RunLinterTool(session, sandbox))
+    registry.register(RunFormatterTool(session, sandbox))
     return registry

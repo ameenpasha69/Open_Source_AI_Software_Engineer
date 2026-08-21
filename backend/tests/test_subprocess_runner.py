@@ -1,11 +1,18 @@
+import shutil
+
 import pytest
 from app.execution.subprocess_runner import (
     ALLOWED_COMMANDS,
     CommandNotAllowedError,
+    SandboxUnavailableError,
     build_sandbox_env,
     check_command_allowed,
     run_command,
 )
+
+_DOCKER_AVAILABLE = shutil.which("docker") is not None
+_SANDBOX_IMAGE = "local-ai-softeng-sandbox:latest"
+requires_docker = pytest.mark.skipif(not _DOCKER_AVAILABLE, reason="Docker is not installed on this machine")
 
 
 def test_check_command_allowed_accepts_allowlisted_binary():
@@ -60,3 +67,82 @@ async def test_run_command_does_not_leak_host_secret_into_subprocess(tmp_path, m
     )
     assert "NOT_SET" in result.stdout
     assert "sk-super-secret" not in result.stdout
+
+
+async def test_run_command_docker_backend_raises_when_docker_binary_missing(tmp_path, monkeypatch):
+    async def _boom(*args, **kwargs):
+        raise FileNotFoundError("docker")
+
+    monkeypatch.setattr("asyncio.create_subprocess_exec", _boom)
+
+    with pytest.raises(SandboxUnavailableError, match="Docker is not installed"):
+        await run_command(["echo", "hi"], cwd=tmp_path, timeout_seconds=5.0, sandbox_backend="docker")
+
+
+@requires_docker
+async def test_run_command_docker_backend_runs_the_command_in_a_container(tmp_path):
+    result = await run_command(
+        ["python3", "-c", "print('hello from container')"],
+        cwd=tmp_path,
+        timeout_seconds=30.0,
+        sandbox_backend="docker",
+        docker_image=_SANDBOX_IMAGE,
+    )
+
+    assert result.exit_code == 0
+    assert "hello from container" in result.stdout
+
+
+@requires_docker
+async def test_run_command_docker_backend_can_see_and_modify_the_mounted_directory(tmp_path):
+    (tmp_path / "input.txt").write_text("42")
+
+    result = await run_command(
+        ["python3", "-c", "open('output.txt', 'w').write(open('input.txt').read() + '!')"],
+        cwd=tmp_path,
+        timeout_seconds=30.0,
+        sandbox_backend="docker",
+        docker_image=_SANDBOX_IMAGE,
+    )
+
+    assert result.exit_code == 0
+    assert (tmp_path / "output.txt").read_text() == "42!"
+
+
+@requires_docker
+async def test_run_command_docker_backend_blocks_network_access(tmp_path):
+    result = await run_command(
+        ["python3", "-c", "import socket; socket.create_connection(('8.8.8.8', 53), timeout=2)"],
+        cwd=tmp_path,
+        timeout_seconds=30.0,
+        sandbox_backend="docker",
+        docker_image=_SANDBOX_IMAGE,
+    )
+
+    assert result.exit_code != 0
+    assert "Network is unreachable" in result.stderr
+
+
+@requires_docker
+async def test_run_command_docker_backend_raises_for_a_nonexistent_image(tmp_path):
+    with pytest.raises(SandboxUnavailableError):
+        await run_command(
+            ["echo", "hi"],
+            cwd=tmp_path,
+            timeout_seconds=30.0,
+            sandbox_backend="docker",
+            docker_image="this-image-does-not-exist-xyz:latest",
+        )
+
+
+@requires_docker
+async def test_run_command_docker_backend_kills_container_on_timeout(tmp_path):
+    result = await run_command(
+        ["python3", "-c", "import time; time.sleep(30)"],
+        cwd=tmp_path,
+        timeout_seconds=1.0,
+        sandbox_backend="docker",
+        docker_image=_SANDBOX_IMAGE,
+    )
+
+    assert result.timed_out is True

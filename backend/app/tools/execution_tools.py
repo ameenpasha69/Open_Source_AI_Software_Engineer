@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 from app.execution.subprocess_runner import (
     CommandExecutionError,
     CommandNotAllowedError,
+    SandboxSettings,
+    SandboxUnavailableError,
     run_command,
 )
 from app.tools.base import Tool, ToolError
@@ -52,10 +54,11 @@ class RunTestsTool(Tool):
     output_schema = RunTestsOutput
     timeout_seconds = 120.0
 
-    def __init__(self, session: Session, timeout_seconds: float | None = None):
+    def __init__(self, session: Session, timeout_seconds: float | None = None, sandbox: SandboxSettings | None = None):
         self._session = session
         if timeout_seconds is not None:
             self.timeout_seconds = timeout_seconds
+        self._sandbox = sandbox or SandboxSettings()
 
     async def run(self, input_data: RunTestsInput) -> RunTestsOutput:
         repository = get_repository(self._session, input_data.repository_id)
@@ -72,9 +75,13 @@ class RunTestsTool(Tool):
 
         try:
             result = await run_command(
-                command, cwd=Path(repository.path), timeout_seconds=self.timeout_seconds, enforce_allowlist=True
+                command,
+                cwd=Path(repository.path),
+                timeout_seconds=self.timeout_seconds,
+                enforce_allowlist=True,
+                **self._sandbox.as_kwargs(),
             )
-        except (CommandExecutionError, CommandNotAllowedError) as exc:
+        except (CommandExecutionError, CommandNotAllowedError, SandboxUnavailableError) as exc:
             raise ToolError(str(exc)) from exc
 
         total, passed_count, failed_tests = parse_pytest_output(result.stdout)
@@ -115,8 +122,9 @@ class RunCommandTool(Tool):
     output_schema = RunCommandOutput
     timeout_seconds = 60.0
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, sandbox: SandboxSettings | None = None):
         self._session = session
+        self._sandbox = sandbox or SandboxSettings()
 
     async def run(self, input_data: RunCommandInput) -> RunCommandOutput:
         repository = get_repository(self._session, input_data.repository_id)
@@ -126,8 +134,9 @@ class RunCommandTool(Tool):
                 cwd=Path(repository.path),
                 timeout_seconds=self.timeout_seconds,
                 enforce_allowlist=True,
+                **self._sandbox.as_kwargs(),
             )
-        except (CommandExecutionError, CommandNotAllowedError) as exc:
+        except (CommandExecutionError, CommandNotAllowedError, SandboxUnavailableError) as exc:
             raise ToolError(str(exc)) from exc
 
         return RunCommandOutput(
@@ -165,8 +174,9 @@ class _ConfiguredCommandTool(Tool):
     _config_field: str
     _missing_config_message: str
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, sandbox: SandboxSettings | None = None):
         self._session = session
+        self._sandbox = sandbox or SandboxSettings()
 
     async def run(self, input_data: RunConfiguredCommandInput) -> RunConfiguredCommandOutput:
         repository = get_repository(self._session, input_data.repository_id)
@@ -177,9 +187,13 @@ class _ConfiguredCommandTool(Tool):
 
         try:
             result = await run_command(
-                command, cwd=Path(repository.path), timeout_seconds=self.timeout_seconds, enforce_allowlist=True
+                command,
+                cwd=Path(repository.path),
+                timeout_seconds=self.timeout_seconds,
+                enforce_allowlist=True,
+                **self._sandbox.as_kwargs(),
             )
-        except (CommandExecutionError, CommandNotAllowedError) as exc:
+        except (CommandExecutionError, CommandNotAllowedError, SandboxUnavailableError) as exc:
             raise ToolError(str(exc)) from exc
 
         return RunConfiguredCommandOutput(

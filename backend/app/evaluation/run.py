@@ -30,6 +30,7 @@ from app.evaluation.report import format_report
 from app.evaluation.runner import EvalTaskRunner
 from app.evaluation.task_loader import load_tasks
 from app.llm.factory import build_llm_provider
+from app.observability.logging import configure_logging
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 
@@ -59,6 +60,7 @@ async def main(argv: list[str]) -> int:
         if v is not None
     }
     settings = settings.model_copy(update=overrides)
+    configure_logging(settings.log_level, settings.log_format)
 
     llm = build_llm_provider(settings)
     embedding_provider = build_embedding_provider(settings)

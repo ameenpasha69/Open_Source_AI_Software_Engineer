@@ -15,6 +15,9 @@ class Settings(BaseSettings):
 
     app_name: str = "local-ai-software-engineer"
     log_level: str = "INFO"
+    # "text" for human-readable console output during development; "json" for
+    # one-object-per-line structured logs suitable for a log aggregator.
+    log_format: str = "text"
     data_dir: Path = Path("./data")
     # The Next.js dev server's origin — the only one allowed to call this API
     # cross-origin. Everything here runs on localhost; this isn't a
@@ -53,6 +56,20 @@ class Settings(BaseSettings):
     # Test suites can legitimately take a while; kept separate from the other,
     # much shorter tool timeouts (git commands, file reads).
     test_execution_timeout_seconds: float = 120.0
+
+    # --- Sandboxing ---
+    # "subprocess" (default) needs nothing but Python — env-var isolation and an
+    # allowlist, but the process still sees the host filesystem and network.
+    # "docker" additionally isolates the filesystem (bind-mounts only the target
+    # repo), disables networking (--network none), and caps memory/CPU — real
+    # container isolation, at the cost of requiring Docker and a prebuilt image
+    # (see docker/sandbox.Dockerfile). Falls back to a clear error, not to
+    # subprocess, if Docker isn't available — silently downgrading a security
+    # boundary the user explicitly asked for would be worse than failing loudly.
+    sandbox_backend: str = "subprocess"
+    sandbox_docker_image: str = "local-ai-softeng-sandbox:latest"
+    sandbox_docker_memory_limit: str = "512m"
+    sandbox_docker_cpu_limit: str = "1.0"
 
     @property
     def database_url(self) -> str:

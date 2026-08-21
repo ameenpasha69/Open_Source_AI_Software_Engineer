@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import json
 import logging
+import time
 
 from pydantic import ValidationError
 from sqlalchemy.orm import Session
@@ -27,6 +28,7 @@ from app.database.models import (
 )
 from app.llm.base import LLMProvider, Message
 from app.llm.exceptions import LLMProviderError
+from app.observability.logging import run_id_var
 from app.retrieval.indexer import RepositoryNotFoundError
 from app.tools.base import ToolExecutor, ToolRegistry
 
@@ -86,32 +88,48 @@ class AgentRunner:
         repository = self._session.get(Repository, repository_id)
         state = AgentState(run_id=run_id, task=task, repository_id=repository_id)
 
+        token = run_id_var.set(run_id)
+        started = time.monotonic()
         try:
-            state.plan = await self._planner.create_plan(task, repository.name)
-            self._emit_event(run_row.id, 0, "plan_created", {"plan": state.plan})
-            self._session.commit()
-
-            while True:
-                termination = check_termination(state, self._max_iterations)
-                if termination is not None:
-                    state.status = termination
-                    break
-                await self._run_iteration(run_row, state)
+            logger.info("agent run started", extra={"repository_id": repository_id, "task": task})
+            try:
+                state.plan = await self._planner.create_plan(task, repository.name)
+                self._emit_event(run_row.id, 0, "plan_created", {"plan": state.plan})
                 self._session.commit()
-        except asyncio.CancelledError:
-            state.status = AgentStatus.CANCELLED
-            self._persist_final(run_row, state)
-            raise
-        except LLMProviderError as exc:
-            state.status = AgentStatus.FAILED
-            state.error = f"LLM error: {exc}"
-        except Exception as exc:
-            logger.exception("Unexpected error in agent run %s", run_row.id)
-            state.status = AgentStatus.FAILED
-            state.error = f"Unexpected agent error: {exc}"
 
-        self._persist_final(run_row, state)
-        return state
+                while True:
+                    termination = check_termination(state, self._max_iterations)
+                    if termination is not None:
+                        state.status = termination
+                        break
+                    await self._run_iteration(run_row, state)
+                    self._session.commit()
+            except asyncio.CancelledError:
+                state.status = AgentStatus.CANCELLED
+                self._persist_final(run_row, state)
+                logger.info("agent run cancelled", extra={"duration_seconds": round(time.monotonic() - started, 3)})
+                raise
+            except LLMProviderError as exc:
+                state.status = AgentStatus.FAILED
+                state.error = f"LLM error: {exc}"
+            except Exception as exc:
+                logger.exception("Unexpected error in agent run %s", run_row.id)
+                state.status = AgentStatus.FAILED
+                state.error = f"Unexpected agent error: {exc}"
+
+            logger.info(
+                "agent run finished",
+                extra={
+                    "status": state.status.value,
+                    "iterations": state.iteration,
+                    "tool_calls": len(state.tool_calls),
+                    "duration_seconds": round(time.monotonic() - started, 3),
+                },
+            )
+            self._persist_final(run_row, state)
+            return state
+        finally:
+            run_id_var.reset(token)
 
     async def _run_iteration(self, run_row: AgentRun, state: AgentState) -> None:
         state.iteration += 1

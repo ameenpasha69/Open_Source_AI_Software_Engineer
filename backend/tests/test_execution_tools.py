@@ -1,7 +1,9 @@
 import json
+import shutil
 
 import pytest
 from app.database.models import Repository
+from app.execution.subprocess_runner import SandboxSettings
 from app.tools.base import ToolError
 from app.tools.execution_tools import (
     RunCommandInput,
@@ -12,6 +14,8 @@ from app.tools.execution_tools import (
     RunTestsInput,
     RunTestsTool,
 )
+
+requires_docker = pytest.mark.skipif(shutil.which("docker") is None, reason="Docker is not installed on this machine")
 
 
 @pytest.fixture
@@ -122,3 +126,33 @@ async def test_run_formatter_uses_configured_command(db_session, repository_with
     result = await tool.run(RunConfiguredCommandInput(repository_id=repository_with_test_command.id))
     assert result.passed is True
     assert "format ok" in result.stdout
+
+
+@requires_docker
+async def test_run_tests_via_docker_sandbox_reports_the_same_structured_result(
+    db_session, repository_with_test_command
+):
+    docker_sandbox = SandboxSettings(backend="docker", docker_image="local-ai-softeng-sandbox:latest")
+    tool = RunTestsTool(db_session, timeout_seconds=30.0, sandbox=docker_sandbox)
+
+    result = await tool.run(RunTestsInput(repository_id=repository_with_test_command.id))
+
+    assert result.passed is False
+    assert result.failure_category == "test_failure"
+    assert result.failed_tests == ["test_math.py::test_add_fails"]
+
+
+@requires_docker
+async def test_run_command_via_docker_sandbox_cannot_reach_the_network(db_session, repository_with_test_command):
+    docker_sandbox = SandboxSettings(backend="docker", docker_image="local-ai-softeng-sandbox:latest")
+    tool = RunCommandTool(db_session, sandbox=docker_sandbox)
+
+    result = await tool.run(
+        RunCommandInput(
+            repository_id=repository_with_test_command.id,
+            command=["python3", "-c", "import socket; socket.create_connection(('8.8.8.8', 53), timeout=2)"],
+        )
+    )
+
+    assert result.passed is False
+    assert "Network is unreachable" in result.stderr

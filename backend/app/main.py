@@ -1,4 +1,3 @@
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -12,9 +11,11 @@ from app.api.routes.search import router as search_router
 from app.api.routes.tools import router as tools_router
 from app.config.settings import get_settings
 from app.database.session import get_engine
+from app.observability.logging import configure_logging
+from app.observability.middleware import RequestIDMiddleware
 
 settings = get_settings()
-logging.basicConfig(level=settings.log_level)
+configure_logging(settings.log_level, settings.log_format)
 
 
 @asynccontextmanager
@@ -36,6 +37,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(RequestIDMiddleware)
 
 app.include_router(health_router, prefix="/api")
 app.include_router(repositories_router, prefix="/api")
