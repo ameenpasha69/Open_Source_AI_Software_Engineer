@@ -136,12 +136,18 @@ class AgentRunner:
         self._emit_event(run_row.id, state.iteration, "iteration_started", {})
 
         messages = self._context_manager.build_messages(state, self._tool_registry.list_specs(), self._max_iterations)
-        decision = await self._get_decision(messages)
+        decision, last_error = await self._get_decision(messages)
 
         if decision is None:
-            observation = f"[iter {state.iteration}] LLM produced invalid/unparseable output; skipping iteration"
+            # Carries the actual validation error into next iteration's
+            # observations (not just "invalid output, skipping") — otherwise
+            # a systematic mistake (e.g. sending a bare list where the
+            # schema wants {"command": [...]}) has no persisted memory
+            # across iterations and can repeat indefinitely until the run
+            # burns its whole iteration budget on the same wrong shape.
+            observation = f"[iter {state.iteration}] Response rejected, iteration skipped: {last_error}"
             state.observations.append(observation)
-            self._emit_event(run_row.id, state.iteration, "invalid_decision", {})
+            self._emit_event(run_row.id, state.iteration, "invalid_decision", {"error": last_error})
             return
 
         self._emit_event(run_row.id, state.iteration, "thought", {"thought": decision.thought})
@@ -217,23 +223,29 @@ class AgentRunner:
             )
         )
 
-    async def _get_decision(self, messages: list[Message]) -> AgentDecision | None:
+    async def _get_decision(self, messages: list[Message]) -> tuple[AgentDecision | None, str | None]:
+        last_error: str | None = None
         for _ in range(_MAX_DECISION_PARSE_ATTEMPTS):
             response = await self._llm.generate(messages, json_mode=True)
             try:
-                return AgentDecision.model_validate(json.loads(response.content))
+                return AgentDecision.model_validate(json.loads(response.content)), None
             except (json.JSONDecodeError, ValidationError) as exc:
+                last_error = str(exc)
                 logger.warning("Agent decision failed to parse, retrying: %s", exc)
                 messages = [
                     *messages,
                     Message(role="assistant", content=response.content),
                     Message(
                         role="user",
-                        content="That was not valid JSON matching the required schema. "
-                        "Respond again with ONLY the JSON object.",
+                        # Includes the actual validation error (not just "invalid
+                        # JSON") — a wrong-shape mistake like sending a bare list
+                        # for "input" needs the specific complaint to have any
+                        # chance of being corrected on retry, not a generic nudge.
+                        content=f"That response was rejected: {exc}\n\n"
+                        "Respond again with ONLY a corrected JSON object matching the schema exactly.",
                     ),
                 ]
-        return None
+        return None, last_error
 
     def _emit_event(self, run_id: str, iteration: int, event_type: str, payload: dict) -> None:
         self._session.add(

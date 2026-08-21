@@ -443,6 +443,22 @@ by code review:**
    Pydantic field validator later (`None` → `{}`), the identical task
    completed correctly in 4 iterations instead of 8, in 9 seconds instead of
    27 — verified by re-running the exact same scenario before and after.
+3. **For `run_command` specifically, the model sends the bare argv list as
+   `"input"`** (`"input": ["git", "add", "."]`) instead of the schema's
+   `{"command": [...]}` — and, unlike the two bugs above, this one didn't
+   self-correct from the validation error alone: a live run repeated the
+   identical wrong shape across the in-loop retry *and* every subsequent
+   iteration, burning its entire iteration budget with zero tool calls ever
+   succeeding. Fixed the same way as the `null` case — a model validator on
+   `AgentAction` that recognizes this one unambiguous shape (`run_command` is
+   the only tool whose entire input is a single list field) and wraps it —
+   plus, since a hardcoded coercion can't cover every future shape mismatch,
+   the parse-retry error message now includes the actual Pydantic complaint
+   instead of a generic "invalid JSON," and a failure that exhausts both
+   retries persists that specific error into the agent's observations
+   instead of a content-free "skipping iteration" note, so a systematic
+   mistake has a chance of being visible on the *next* iteration too, not
+   just discarded.
 
 ## Streaming, background execution, and the frontend
 

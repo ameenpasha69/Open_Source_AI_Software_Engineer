@@ -15,7 +15,7 @@ from app.llm.exceptions import LLMConnectionError
 from app.retrieval.indexer import RepositoryIndexer, RepositoryNotFoundError
 from app.tools.base import ToolRegistry
 from app.tools.code_search_tools import FindSymbolTool
-from app.tools.execution_tools import RunTestsTool
+from app.tools.execution_tools import RunCommandTool, RunTestsTool
 from app.tools.file_tools import ReadFileTool
 from app.tools.patch_tools import ApplyPatchTool
 from sqlalchemy import select
@@ -38,6 +38,7 @@ def tool_registry(db_session):
     registry.register(ReadFileTool(db_session, max_file_size_bytes=1_000_000))
     registry.register(ApplyPatchTool(db_session))
     registry.register(RunTestsTool(db_session, timeout_seconds=30.0))
+    registry.register(RunCommandTool(db_session))
     return registry
 
 
@@ -97,7 +98,38 @@ async def test_agent_skips_iteration_when_decision_unparseable_after_retries(
 
     assert state.status == AgentStatus.DONE
     assert state.iteration == 2  # iteration 1 was skipped (unparseable), iteration 2 finished
-    assert any("invalid" in obs.lower() for obs in state.observations)
+    # The specific parse error is persisted into observations (not just a
+    # generic "invalid output" note) so a systematic mistake has a chance of
+    # being visible to the model on the next iteration too.
+    assert any("rejected" in obs.lower() and "Expecting value" in obs for obs in state.observations)
+
+
+async def test_agent_runs_run_command_when_llm_sends_bare_argv_list(
+    db_session, indexed_repository_id, tool_registry
+):
+    """Reproduces a real observed failure verbatim: qwen2.5-coder:7b sent
+    exactly this JSON for run_command — "input" as the bare argv list
+    instead of {"command": [...]} — and repeated the identical mistake
+    across many iterations, burning the whole run without ever calling
+    run_command successfully. AgentAction's coercion should make this
+    resolve in a single iteration instead of ever hitting the parse-retry
+    path at all."""
+    bare_list_decision = (
+        '{"thought": "clean up untracked files", '
+        '"action": {"tool": "run_command", "input": ["git", "clean", "-fdx"]}, "finish": null}'
+    )
+    llm = FakeLLMProvider(responses=[_PLAN_RESPONSE, bare_list_decision, _FINISH_RESPONSE])
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=5)
+
+    state = await runner.run(indexed_repository_id, "task")
+
+    assert state.status == AgentStatus.DONE
+    assert state.iteration == 2  # no wasted "invalid_decision" iteration
+    assert not any("rejected" in obs.lower() for obs in state.observations)
+    [tool_call] = state.tool_calls
+    assert tool_call.tool_name == "run_command"
+    assert tool_call.result.success is True
+    assert tool_call.input == {"command": ["git", "clean", "-fdx"]}
 
 
 async def test_agent_run_fails_when_llm_becomes_unreachable(db_session, indexed_repository_id, tool_registry):

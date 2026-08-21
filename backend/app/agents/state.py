@@ -28,6 +28,21 @@ class AgentAction(BaseModel):
         # an iteration (and the one retry) every time it happened.
         return {} if value is None else value
 
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_bare_argv_list_for_run_command(cls, data: Any) -> Any:
+        # Observed live: for run_command specifically, the model repeatedly
+        # emits `"input": ["git", "add", "."]` — the bare argv list — instead
+        # of the schema's `{"command": [...]}`, and repeats the identical
+        # mistake across both the in-loop retry and subsequent iterations
+        # rather than self-correcting from the validation error alone.
+        # run_command is the only tool whose entire (non-repository_id) input
+        # is a single list field, so this coercion is unambiguous — there's
+        # no other tool a bare list could plausibly have been meant for.
+        if isinstance(data, dict) and data.get("tool") == "run_command" and isinstance(data.get("input"), list):
+            data = {**data, "input": {"command": data["input"]}}
+        return data
+
 
 class AgentFinish(BaseModel):
     answer: str

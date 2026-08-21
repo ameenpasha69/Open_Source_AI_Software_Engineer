@@ -46,6 +46,30 @@ def test_decision_parses_from_json_with_null_action_input():
     assert decision.action.input == {}
 
 
+def test_action_coerces_bare_argv_list_for_run_command():
+    """Regression: qwen2.5-coder:7b repeatedly emits "input": ["git", "add",
+    "."] for run_command instead of the schema's {"command": [...]} — found
+    via a live run where it repeated this exact mistake across many
+    iterations without self-correcting from the validation error alone."""
+    action = AgentAction(tool="run_command", input=["git", "add", "."])
+    assert action.input == {"command": ["git", "add", "."]}
+
+
+def test_action_does_not_coerce_bare_list_for_other_tools():
+    """The coercion is unambiguous only for run_command (the one tool whose
+    entire input is a single list field) — a bare list for any other tool
+    should still fail validation rather than being silently guessed at."""
+    with pytest.raises(ValidationError):
+        AgentAction(tool="run_tests", input=["a", "b"])
+
+
+def test_decision_parses_from_json_with_bare_argv_list_for_run_command():
+    raw = '{"thought": "clean up", "action": {"tool": "run_command", "input": ["git", "clean", "-fdx"]}, "finish": null}'
+    decision = AgentDecision.model_validate(json.loads(raw))
+    assert decision.action.tool == "run_command"
+    assert decision.action.input == {"command": ["git", "clean", "-fdx"]}
+
+
 def _state(**overrides) -> AgentState:
     defaults = {"run_id": "r1", "task": "t", "repository_id": "repo1"}
     defaults.update(overrides)
