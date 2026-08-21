@@ -21,6 +21,7 @@ This project is being built incrementally, one milestone at a time (see
 - ✅ **Milestone 6** — Basic agent loop (investigation and diagnosis)
 - ✅ **Milestone 7** — Code modification (`apply_patch`)
 - ✅ **Milestone 8** — Test execution + self-correction
+- ✅ **Milestone 9** — Streaming UI (SSE, background execution, cancellation) + Next.js frontend
 
 Everything below this line describes what exists *today*, not the end goal.
 The full architecture (agent loop, retrieval, tool system, evaluation
@@ -439,6 +440,44 @@ by code review:**
    completed correctly in 4 iterations instead of 8, in 9 seconds instead of
    27 — verified by re-running the exact same scenario before and after.
 
+## Streaming, background execution, and the frontend
+
+`POST /api/agent/run` now returns immediately (`status: "running"`) instead
+of blocking for the run's full duration. `AgentRunner.run()` is split into
+`create_run()` (persist the row, hand back a real `run_id` right away) and
+`execute()` (the actual loop), with the route handing `execute()` to an
+`asyncio.Task` tracked by a small `BackgroundAgentRunner` rather than
+awaiting it inline.
+
+**`GET /api/agent/{run_id}/stream`** (SSE) replays every event recorded so
+far, then polls the DB for new `AgentEvent` rows and pushes each one as it's
+committed, until the run reaches a terminal status. DB-polling rather than
+an in-process pub/sub queue: the background task and the stream are
+different `asyncio.Task`s with their own DB sessions, and only a *fresh*
+session reliably sees another session's commits — simplest correct fix is a
+new short-lived session per poll, which also means reconnecting mid-run
+doesn't lose anything. Regular events are unnamed SSE messages
+(`event_type` travels inside the JSON body) so the frontend's one
+`onmessage` handler covers every event type without registering a listener
+per type ahead of time; only the terminal `run_completed` marker is a named
+event.
+
+**`POST /api/agent/{run_id}/cancel`** cancels the tracked `asyncio.Task` and
+*awaits* it before responding, so the caller never sees `"cancelled"` while
+the run is still writing to the DB. Verified live against a real in-flight
+Ollama call: cancelling interrupted it in ~1s and persisted `"cancelled"`.
+
+**The frontend** (`frontend/`, Next.js + TypeScript + Tailwind) is a
+single-page dashboard: a repository sidebar, a task input, and five tabs —
+Timeline (the live SSE feed), Code (snippets the agent actually retrieved,
+via a new `GET /api/agent/{run_id}/tool-calls` detail endpoint), Diff, Tests,
+and a synthesized Final Report (summary, root cause, changes made, tests,
+verification status, remaining risks). Verified end to end in a real
+browser against a real Ollama-backed run with a deliberately introduced bug:
+the timeline streamed real reasoning and tool calls live, and all four
+detail tabs rendered correctly from the same run — including a correctly
+colored diff and a `verified` badge once tests passed.
+
 ## Hardware / model defaults
 
 Defaults were chosen for a machine with 16GB+ RAM and no dedicated GPU
@@ -454,23 +493,26 @@ requirement (tested on Apple Silicon, 36GB RAM):
 
 ## Installation
 
-Requires: Python 3.11+, [Ollama](https://ollama.com) installed.
+Requires: Python 3.11+, [Ollama](https://ollama.com), Node.js 18+ (for the
+frontend).
 
 ```bash
 ./scripts/setup.sh
+cd frontend && npm install && cd ..
 ```
 
-This creates a virtualenv, installs dependencies, copies `.env.example` to
-`.env`, starts Ollama if it isn't running, and pulls the configured LLM and
-embedding models (a few GB — see model sizes above).
+`setup.sh` creates a virtualenv, installs dependencies, copies `.env.example`
+to `.env`, starts Ollama if it isn't running, and pulls the configured LLM
+and embedding models (a few GB — see model sizes above).
 
 ## Running
 
 ```bash
-./scripts/start.sh
+./scripts/start.sh          # backend on :8000
+cd frontend && npm run dev  # frontend on :3000, in a second terminal
 ```
 
-Then check:
+Open http://localhost:3000, or check the API directly:
 
 ```bash
 curl http://localhost:8000/api/health
@@ -524,9 +566,13 @@ backend/
     execution/   # sandboxed subprocess runner (allowlist, env isolation, timeout, output caps)
     api/routes/  # FastAPI routers
     schemas/     # Pydantic request/response models
-    agents/      # AgentRunner, Planner, ContextManager, state, termination logic
+    agents/      # AgentRunner, Planner, ContextManager, state, termination logic, background execution
     verification/ evaluation/ models/   # scaffolded, empty — future milestones
   tests/
+frontend/
+  app/page.tsx       # the whole UI — repository selection, task input, five tabs
+  lib/                # typed API client, SSE hook, TypeScript types mirroring the backend schemas
+  components/         # one component per panel (Timeline/Code/Diff/Tests/Report)
 scripts/         # setup.sh, start.sh
 data/            # local vector index, SQLite DB (gitignored)
 evals/           # benchmark tasks (future milestone)
@@ -537,6 +583,16 @@ docs/
 
 - Only Ollama is implemented as an LLM/embedding provider; the interfaces
   support others but none are built yet.
+- **A cancelled/in-progress run's trackability doesn't survive a server
+  restart** — `BackgroundAgentRunner` tracks `asyncio.Task`s in memory only.
+  A restarted server can still show a run's persisted state via
+  `GET /api/agent/{run_id}`, it just can't cancel it or know it's still
+  technically running (the OS process that was running it is gone anyway).
+- **The frontend polls detail endpoints on tool completion, not truly
+  push-based for Code/Diff/Tests** — the Timeline tab is genuinely real-time
+  (SSE), but the other tabs refetch `GET /api/agent/{run_id}/{diff,tests,
+  tool-calls}` when a relevant event arrives rather than streaming that
+  detail directly, since the SSE payloads are deliberately compact.
 - **No Docker sandboxing yet** — command execution is a local subprocess with
   an allowlist, environment isolation, and timeouts, which is a real safety
   boundary but not the same as container isolation. Docker was deliberately

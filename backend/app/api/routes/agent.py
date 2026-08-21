@@ -174,8 +174,11 @@ async def _event_stream(run_id: str, request: Request, session_factory: sessionm
 
         for event in new_events:
             seen_event_ids.add(event.id)
-            out = _to_event_out(event)
-            yield f"event: {out.event_type}\ndata: {out.model_dump_json()}\n\n"
+            # Deliberately unnamed (no "event:" line): event_type already
+            # travels inside the JSON payload, and a plain default message is
+            # what EventSource.onmessage picks up without the client having
+            # to register a listener per possible event_type ahead of time.
+            yield f"data: {_to_event_out(event).model_dump_json()}\n\n"
 
         if status != "running":
             yield f"event: run_completed\ndata: {json.dumps({'status': status})}\n\n"

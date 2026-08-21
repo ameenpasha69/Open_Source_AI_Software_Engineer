@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from app.llm.factory import get_llm_provider
 from app.main import app
@@ -253,15 +254,20 @@ async def test_stream_agent_run_emits_events_and_closes_on_completion(client, sa
             assert "text/event-stream" in stream_resp.headers["content-type"]
 
             event_types = []
+            closed = False
             async for line in stream_resp.aiter_lines():
-                if line.startswith("event: "):
-                    event_types.append(line.removeprefix("event: "))
-                if line.startswith("event: run_completed"):
+                if not line.startswith("data: "):
+                    continue
+                payload = json.loads(line.removeprefix("data: "))
+                if "event_type" in payload:
+                    event_types.append(payload["event_type"])
+                elif "status" in payload:  # the terminal run_completed marker
+                    closed = True
                     break
 
+    assert closed
     assert "plan_created" in event_types
     assert "finished" in event_types
-    assert event_types[-1] == "run_completed"
 
 
 async def test_stream_unknown_run_returns_404(client):
