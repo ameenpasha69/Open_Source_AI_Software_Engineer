@@ -833,7 +833,21 @@ docs/
   whitespace-tolerant matching, and it can only edit existing files, not
   create new ones. If the model's `old_content` doesn't match the file
   byte-for-byte (e.g. subtly wrong indentation), the patch is rejected
-  rather than guessed at.
+  rather than guessed at. On a mismatch, the tool now shows the closest
+  actual line(s) in the file (`_find_closest_match`, scored on whitespace-
+  normalized `difflib` similarity so indentation differences don't hide a
+  real near-miss) so a retry has something concrete to correct against —
+  this doesn't loosen the match itself, only the failure feedback. Added
+  after watching a real run: the model correctly located a bug (`"age";
+  17,` — a stray semicolon) but transcribed it as `"age": 17;` three times
+  in a row with no signal to notice the mismatch. With the hint in place,
+  every subsequent attempt in that same run *did* show the exact real line
+  right in the error — and the model still wrote `"age":` with a colon
+  three more times instead of copying the semicolon it was being shown.
+  That's the harness working as intended and the model still not
+  recovering: real evidence this specific failure is a model-attention
+  limitation, not a fixable tooling gap, and better tooling alone doesn't
+  close it.
 - No re-planning — the initial plan is fixed for the whole run, even if
   early observations contradict it. The agent still adapts moment-to-moment
   (each turn sees all prior observations), just not by rewriting the plan.
