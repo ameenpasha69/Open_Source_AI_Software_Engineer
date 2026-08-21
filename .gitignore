@@ -10,6 +10,8 @@ venv/
 data/
 !data/.gitkeep
 
+evals/runs/
+
 node_modules/
 .next/
 frontend/dist/

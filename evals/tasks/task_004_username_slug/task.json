@@ -1,0 +1,5 @@
+{
+  "id": "task_004_username_slug",
+  "description": "make_username_slug(display_name) is supposed to produce a lowercase, hyphen-separated slug (e.g. \"Ada Lovelace\" -> \"ada-lovelace\"), but it's producing uppercase slugs instead. Find the bug in users.py, fix it with apply_patch, and run the tests to verify before finishing.",
+  "expected_file": "users.py"
+}

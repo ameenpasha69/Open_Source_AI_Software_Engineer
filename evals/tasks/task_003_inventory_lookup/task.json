@@ -1,0 +1,5 @@
+{
+  "id": "task_003_inventory_lookup",
+  "description": "get_stock_level(product_name) is supposed to return 0 for products that aren't tracked, but it's crashing with a KeyError instead. Find the bug in inventory.py, fix it with apply_patch, and run the tests to verify before finishing.",
+  "expected_file": "inventory.py"
+}

@@ -1,0 +1,5 @@
+{
+  "id": "task_002_discount_threshold",
+  "description": "apply_bulk_discount(total, quantity) is supposed to give a 15% discount for orders of 10 or more items, but orders of exactly 10 items aren't getting the discount. Find the bug in pricing.py, fix it with apply_patch, and run the tests to verify before finishing.",
+  "expected_file": "pricing.py"
+}

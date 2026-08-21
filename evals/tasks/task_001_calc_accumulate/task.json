@@ -1,0 +1,5 @@
+{
+  "id": "task_001_calc_accumulate",
+  "description": "calculate_total(items) is returning the wrong value for orders with multiple items. In calc.py, read the function, find the bug, fix it with apply_patch, and run the tests to verify before finishing.",
+  "expected_file": "calc.py"
+}

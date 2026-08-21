@@ -22,6 +22,7 @@ This project is being built incrementally, one milestone at a time (see
 - ✅ **Milestone 7** — Code modification (`apply_patch`)
 - ✅ **Milestone 8** — Test execution + self-correction
 - ✅ **Milestone 9** — Streaming UI (SSE, background execution, cancellation) + Next.js frontend
+- ✅ **Milestone 10** — Evaluation framework (ground-truth-independent scoring against real Ollama runs)
 
 Everything below this line describes what exists *today*, not the end goal.
 The full architecture (agent loop, retrieval, tool system, evaluation
@@ -478,6 +479,128 @@ the timeline streamed real reasoning and tool calls live, and all four
 detail tabs rendered correctly from the same run — including a correctly
 colored diff and a `verified` badge once tests passed.
 
+## Evaluation framework
+
+Ad-hoc live testing (the "I ran it once and here's what happened" notes
+throughout this README) doesn't scale to comparing models, prompts, or
+retrieval settings — it's anecdote, not measurement. Milestone 10 adds a
+small benchmark suite and an evaluator that scores every run itself, so
+claims like "the 7b model closes the loop more reliably than the 14b model"
+can be backed by a number instead of a vibe.
+
+**Tasks** (`evals/tasks/`) are small, hand-written fixture repos, each with a
+seeded bug and a `task.json` describing it in natural language, checked
+straight into git:
+
+```text
+evals/tasks/task_001_calc_accumulate/
+  task.json          # {"id", "description", "expected_file"}
+  repo/
+    calc.py          # the bug: `total = item.price` instead of `+=`
+    test_calc.py     # 3 tests — 1 fails at baseline
+```
+
+Four tasks currently exist, each a single-file bug with 3 pytest tests, and
+each verified against real pytest before being wired into the evaluator: an
+accumulator bug, a boundary condition (`>` vs `>=`), a missing-key lookup,
+and a case-normalization bug. Two tasks include unrelated decoy files, to
+give the retrieval-hit-rate metric something to actually measure.
+
+**The evaluator doesn't trust the agent's self-report.** `EvalTaskRunner`
+copies each fixture repo to an isolated `evals/runs/{timestamp}/` work
+directory (never the checked-in template — never the project's own
+`pyproject.toml`/pytest config, which subprocess pytest would otherwise pick
+up if run from inside this repo's tree), takes its own `pytest -v` snapshot
+*before* the agent runs, indexes and runs the real agent loop against the
+copy, then takes a second snapshot *after* — regardless of whether the agent
+itself ever called `run_tests`. This matters because it doesn't always: an
+agent that reasons its way to "looks fixed" and emits `finish` without
+verifying is scored as a failure unless the evaluator's own independent test
+run actually passes.
+
+**Metrics computed per task and aggregated into `EvalReport`:**
+
+- **Success** — evaluator's own final pytest run exits `0`.
+- **First-attempt success** — success with exactly one `apply_patch` call
+  that succeeded (no trial-and-error).
+- **Regressions** — tests that passed at baseline and no longer do (`pytest
+  -v`'s explicit per-test PASSED/FAILED lines make this a real diff, not just
+  a pass-count comparison, which would miss a fix that breaks a different
+  test while "fixing" the target one — this is exactly how the eval's own
+  test suite caught a wrong-fix case that looked no-op but actually zeroed
+  out a previously-passing test).
+- **Retrieval hit rate** — for tasks with an `expected_file`, whether that
+  filename ever appeared in a tool call's output (a coarse "did retrieval
+  surface the right file" heuristic, not a judged relevance score).
+- Iterations, tool calls, and wall-clock duration, for cost/latency
+  comparison across models.
+
+**Running it** (against a real, locally running Ollama — this is not mocked):
+
+```bash
+source .venv/bin/activate
+PYTHONPATH=backend python3 -m app.evaluation.run
+PYTHONPATH=backend python3 -m app.evaluation.run --llm-model qwen2.5-coder:14b --output evals/runs/14b.json
+```
+
+Each invocation is a fully isolated run: its own timestamped SQLite DB and
+vector index under `evals/runs/` (gitignored — these are run artifacts, not
+source), so comparing two models means running the CLI twice with different
+`--llm-model` values and diffing the two reports.
+
+Real output from a run against the default model (`qwen2.5-coder:7b`,
+`MAX_AGENT_ITERATIONS=8`):
+
+```text
+Local AI Software Engineer Evaluation
+──────────────────────────────────────────
+
+Config:                llm_model=qwen2.5-coder:7b, embedding_model=nomic-embed-text, max_agent_iterations=8
+
+Tasks:                 4
+Successful:            3
+Success rate:          75%
+
+First attempt:         3
+First-attempt rate:    75%
+
+Average iterations:    7.0
+Average tool calls:    6.2
+Average runtime:       23.2s
+
+Regression rate:       0%
+Retrieval hit rate:    100%
+
+Per-task detail:
+  ✓ task_001_calc_accumulate            status=done                   verification=failed             iters=8 tools=7 28.2s
+  ✓ task_002_discount_threshold         status=done                   verification=verified           iters=4 tools=3 13.9s
+  ✓ task_003_inventory_lookup           status=done                   verification=verified           iters=8 tools=7 25.4s
+  ✗ task_004_username_slug              status=max_iterations_reached verification=failed             iters=8 tools=8 25.2s
+```
+
+**`task_001` is exactly the case this framework exists to catch.** The
+agent applied the correct patch on iteration 2 (`total = item.price` →
+`total += item.price`), then tried to verify with `run_tests({"test_path":
+"calc.py"})` — pointing pytest at the *implementation* file instead of
+`test_calc.py`, which collects zero tests (`exit_code=5`, no tests ran) and
+gets classified as an `environment_error`, not a pass or fail. Rather than
+retrying with the right path, the agent re-attempted the same `apply_patch`
+call (which now correctly failed — the `old_content` no longer existed
+post-fix), read the file once more, and called `finish` anyway. Its own
+`verification_status` is honestly `failed` — the agent never got a real
+test result. The evaluator's independent snapshot shows the fix was
+actually correct (`final.exit_code == 0`, no regressions), so this is scored
+as a **success with a self-verification failure** — a distinction that only
+exists because the evaluator never trusts what the agent reports about
+itself. `task_004` reproduces the under-commits-to-finishing pattern
+described in [Limitations](#limitations-current-milestone) — it hit
+`max_agent_iterations` without ever calling `finish`.
+
+One run of four tasks isn't a statistically meaningful benchmark — it's
+enough to prove the scoring logic works and to surface a real,
+reproducible failure mode. The value of the framework is in *repeated* runs
+across models/settings, not this single snapshot.
+
 ## Hardware / model defaults
 
 Defaults were chosen for a machine with 16GB+ RAM and no dedicated GPU
@@ -567,7 +690,8 @@ backend/
     api/routes/  # FastAPI routers
     schemas/     # Pydantic request/response models
     agents/      # AgentRunner, Planner, ContextManager, state, termination logic, background execution
-    verification/ evaluation/ models/   # scaffolded, empty — future milestones
+    evaluation/  # eval task loader, ground-truth test snapshots, scoring, CLI runner
+    verification/ models/   # scaffolded, empty — future milestones
   tests/
 frontend/
   app/page.tsx       # the whole UI — repository selection, task input, five tabs
@@ -575,7 +699,9 @@ frontend/
   components/         # one component per panel (Timeline/Code/Diff/Tests/Report)
 scripts/         # setup.sh, start.sh
 data/            # local vector index, SQLite DB (gitignored)
-evals/           # benchmark tasks (future milestone)
+evals/
+  tasks/           # fixture repos + task.json definitions, checked in
+  runs/            # timestamped output per eval run — patched repos, SQLite DB, JSON report (gitignored)
 docs/
 ```
 
@@ -635,10 +761,6 @@ docs/
   create new ones. If the model's `old_content` doesn't match the file
   byte-for-byte (e.g. subtly wrong indentation), the patch is rejected
   rather than guessed at.
-- No background execution, polling, or cancellation — `POST /api/agent/run`
-  blocks until the run finishes (it doesn't block *other* requests, since
-  the loop is `async`, but there's no way to check progress or cancel a
-  run in flight). That arrives with Milestone 9's streaming work.
 - No re-planning — the initial plan is fixed for the whole run, even if
   early observations contradict it. The agent still adapts moment-to-moment
   (each turn sees all prior observations), just not by rewriting the plan.
