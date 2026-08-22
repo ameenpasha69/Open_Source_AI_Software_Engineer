@@ -6,8 +6,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.agent import router as agent_router
 from app.api.routes.health import router as health_router
+from app.api.routes.models import router as models_router
 from app.api.routes.repositories import router as repositories_router
 from app.api.routes.search import router as search_router
+from app.api.routes.sessions import router as sessions_router
 from app.api.routes.tools import router as tools_router
 from app.config.settings import get_settings
 from app.database.session import get_engine
@@ -40,7 +42,9 @@ app.add_middleware(
 app.add_middleware(RequestIDMiddleware)
 
 app.include_router(health_router, prefix="/api")
+app.include_router(models_router, prefix="/api")
 app.include_router(repositories_router, prefix="/api")
 app.include_router(search_router, prefix="/api")
 app.include_router(tools_router, prefix="/api")
 app.include_router(agent_router, prefix="/api")
+app.include_router(sessions_router, prefix="/api")

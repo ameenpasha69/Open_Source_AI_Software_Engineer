@@ -7,7 +7,7 @@ import { StatusBadge } from "./StatusBadge";
 function TestRunCard({ run }: { run: TestRunOut }) {
   const [expanded, setExpanded] = useState(false);
   return (
-    <div className="rounded-md border border-border">
+    <div className="rounded-lg border border-border">
       <button
         onClick={() => setExpanded((e) => !e)}
         className="flex w-full items-center justify-between px-3 py-2 text-left text-sm"
@@ -62,9 +62,9 @@ function TestRunCard({ run }: { run: TestRunOut }) {
 
 export function TestPanel({ testRuns }: { testRuns: TestRunOut[] }) {
   return (
-    <div className="flex h-full flex-col rounded-lg border border-border bg-surface">
-      <div className="border-b border-border px-4 py-2">
-        <h3 className="text-sm font-semibold text-muted uppercase tracking-wide">
+    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border bg-surface">
+      <div className="shrink-0 border-b border-border px-4 py-2.5">
+        <h3 className="text-xs font-semibold tracking-wide text-muted uppercase">
           Tests ({testRuns.length} run{testRuns.length === 1 ? "" : "s"})
         </h3>
       </div>

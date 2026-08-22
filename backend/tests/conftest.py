@@ -37,10 +37,16 @@ class FakeLLMProvider(LLMProvider):
         self._reachable = reachable
         self.received_messages: list[list[Message]] = []
         self.json_mode_calls: list[bool] = []
+        self.temperatures: list[float | None] = []
+
+    @property
+    def model(self) -> str:
+        return "fake-model"
 
     async def generate(self, messages, *, temperature=None, max_tokens=None, json_mode=False) -> LLMResponse:
         self.received_messages.append(messages)
         self.json_mode_calls.append(json_mode)
+        self.temperatures.append(temperature)
         if self._responses is not None:
             if not self._responses:
                 raise AssertionError("FakeLLMProvider.generate() called more times than scripted responses")
@@ -79,6 +85,10 @@ class FakeEmbeddingProvider(EmbeddingProvider):
         self._dimension = dimension
         self._reachable = reachable
         self.embedded_texts: list[str] = []
+
+    @property
+    def model(self) -> str:
+        return "fake-embedding-model"
 
     async def embed_text(self, text: str) -> list[float]:
         return (await self.embed_documents([text]))[0]

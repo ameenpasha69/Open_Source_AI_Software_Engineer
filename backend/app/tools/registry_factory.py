@@ -8,7 +8,7 @@ from app.tools.code_search_tools import FindReferencesTool, FindSymbolTool, Sear
 from app.tools.execution_tools import RunCommandTool, RunFormatterTool, RunLinterTool, RunTestsTool
 from app.tools.file_tools import GetFileContextTool, ListFilesTool, ReadFileTool
 from app.tools.git_tools import GetGitDiffTool, GetGitLogTool, GetGitStatusTool
-from app.tools.patch_tools import ApplyPatchTool
+from app.tools.patch_tools import ApplyPatchTool, CreateFileTool, DeleteFileTool
 
 
 def build_tool_registry(session: Session, settings: Settings, embedding_provider: EmbeddingProvider) -> ToolRegistry:
@@ -34,6 +34,8 @@ def build_tool_registry(session: Session, settings: Settings, embedding_provider
     registry.register(GetGitDiffTool(session))
     registry.register(GetGitLogTool(session))
     registry.register(ApplyPatchTool(session))
+    registry.register(CreateFileTool(session))
+    registry.register(DeleteFileTool(session))
     registry.register(RunTestsTool(session, settings.test_execution_timeout_seconds, sandbox))
     registry.register(RunCommandTool(session, sandbox))
     registry.register(RunLinterTool(session, sandbox))

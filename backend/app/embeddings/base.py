@@ -10,6 +10,11 @@ class EmbeddingProvider(ABC):
     `factory.py` — the vector store and retrieval pipeline are untouched.
     """
 
+    @property
+    @abstractmethod
+    def model(self) -> str:
+        """The embedding model this instance is bound to — see LLMProvider.model."""
+
     @abstractmethod
     async def embed_text(self, text: str) -> list[float]:
         """Embed a single piece of text (e.g. a search query)."""

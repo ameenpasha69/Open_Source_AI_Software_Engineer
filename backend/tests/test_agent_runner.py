@@ -17,7 +17,7 @@ from app.tools.base import ToolRegistry
 from app.tools.code_search_tools import FindSymbolTool
 from app.tools.execution_tools import RunCommandTool, RunTestsTool
 from app.tools.file_tools import ReadFileTool
-from app.tools.patch_tools import ApplyPatchTool
+from app.tools.patch_tools import ApplyPatchTool, CreateFileTool, DeleteFileTool
 from sqlalchemy import select
 
 from tests.conftest import FakeLLMProvider
@@ -37,6 +37,8 @@ def tool_registry(db_session):
     registry.register(FindSymbolTool(db_session))
     registry.register(ReadFileTool(db_session, max_file_size_bytes=1_000_000))
     registry.register(ApplyPatchTool(db_session))
+    registry.register(CreateFileTool(db_session))
+    registry.register(DeleteFileTool(db_session))
     registry.register(RunTestsTool(db_session, timeout_seconds=30.0))
     registry.register(RunCommandTool(db_session))
     return registry
@@ -66,7 +68,14 @@ async def test_agent_finds_symbol_and_finishes(db_session, indexed_repository_id
 
 
 async def test_agent_stops_at_max_iterations_without_finishing(db_session, indexed_repository_id, tool_registry):
-    llm = FakeLLMProvider(responses=[_PLAN_RESPONSE] + [_FIND_SYMBOL_ACTION] * 3)
+    # Distinct symbols per iteration on purpose: three *identical* calls would
+    # now trip the redundancy guard and stop the run as NO_PROGRESS instead,
+    # which is a different stop condition than the one under test here.
+    searches = [
+        f'{{"thought": "look", "action": {{"tool": "find_symbol", "input": {{"symbol": "{symbol}"}}}}, "finish": null}}'
+        for symbol in ("entrypoint", "helper", "main")
+    ]
+    llm = FakeLLMProvider(responses=[_PLAN_RESPONSE, *searches])
     runner = AgentRunner(db_session, llm, tool_registry, max_iterations=3)
 
     state = await runner.run(indexed_repository_id, "task")
@@ -364,3 +373,108 @@ async def test_agent_run_persists_test_runs(db_session, calc_repository_id, tool
     assert len(test_runs) == 1
     assert test_runs[0].passed is True
     assert test_runs[0].repository_id == calc_repository_id
+
+
+# --- create_file: the tool that plugs the "can't make a new file" gap -------
+#
+# Regression coverage for a run observed live: needing tests/test_x.py to
+# exist, the model tried run_command(["touch", ...]) — correctly rejected by
+# the allowlist — then repeated that exact rejected call until the loop guard
+# stopped it, having never created anything. create_file is the fix; these
+# confirm it plugs all the way through the same tracking apply_patch gets.
+
+_CREATE_FILE_ACTION = (
+    '{"thought": "add a test file", "action": {"tool": "create_file", '
+    '"input": {"path": "tests/test_entrypoint.py", "content": "def test_it():\\n    assert True\\n"}}, '
+    '"finish": null}'
+)
+_FINISH_AFTER_CREATE = (
+    '{"thought": "done", "action": null, "finish": {"answer": "added a test file", "root_cause": null}}'
+)
+
+
+async def test_agent_creates_a_file_and_tracks_it_as_modified(
+    db_session, indexed_repository_id, tool_registry, sample_repo
+):
+    llm = FakeLLMProvider(responses=[_PLAN_RESPONSE, _CREATE_FILE_ACTION, _FINISH_AFTER_CREATE])
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=5)
+
+    state = await runner.run(indexed_repository_id, "add a test file for entrypoint")
+
+    assert state.status == AgentStatus.DONE
+    assert state.modified_files == ["tests/test_entrypoint.py"]
+    assert state.verification_status == "unverified"
+    assert (sample_repo / "tests" / "test_entrypoint.py").read_text() == "def test_it():\n    assert True\n"
+
+
+async def test_create_file_result_persists_as_a_modified_file_row(
+    db_session, indexed_repository_id, tool_registry
+):
+    llm = FakeLLMProvider(responses=[_PLAN_RESPONSE, _CREATE_FILE_ACTION, _FINISH_AFTER_CREATE])
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=5)
+
+    state = await runner.run(indexed_repository_id, "task")
+
+    modified = db_session.scalars(select(ModifiedFile).where(ModifiedFile.run_id == state.run_id)).all()
+    assert len(modified) == 1
+    assert modified[0].relative_path == "tests/test_entrypoint.py"
+    assert modified[0].lines_added == 2
+    assert modified[0].lines_removed == 0
+    assert "+def test_it():" in modified[0].diff
+
+
+# --- delete_file: the missing half of a rename ------------------------------
+#
+# Regression coverage for a run observed live: asked to rename calc.py to
+# adv_calc.py, the model's own plan literally said "Rename calc.py to
+# adv_calc.py" — a step with no corresponding tool, since apply_patch only
+# modifies an existing path and create_file only adds a new one. It never
+# attempted either; it re-searched for content that didn't exist until the
+# redundancy guard stopped it. delete_file is the other half create_file
+# needed to make a rename actually possible.
+
+_DELETE_FILE_ACTION = (
+    '{"thought": "remove the old file", "action": {"tool": "delete_file", '
+    '"input": {"path": "main.py"}}, "finish": null}'
+)
+_FINISH_AFTER_DELETE = (
+    '{"thought": "done", "action": null, "finish": {"answer": "removed main.py", "root_cause": null}}'
+)
+
+
+async def test_agent_deletes_a_file_and_tracks_it_as_modified(
+    db_session, indexed_repository_id, tool_registry, sample_repo
+):
+    llm = FakeLLMProvider(responses=[_PLAN_RESPONSE, _DELETE_FILE_ACTION, _FINISH_AFTER_DELETE])
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=5)
+
+    state = await runner.run(indexed_repository_id, "remove main.py")
+
+    assert state.status == AgentStatus.DONE
+    assert state.modified_files == ["main.py"]
+    assert state.verification_status == "unverified"
+    assert not (sample_repo / "main.py").exists()
+
+
+async def test_a_rename_is_create_then_delete_in_one_run(
+    db_session, indexed_repository_id, tool_registry, sample_repo
+):
+    create_new = (
+        '{"thought": "write the renamed file", "action": {"tool": "create_file", '
+        '"input": {"path": "entrypoint.py", "content": "def entrypoint():\\n    pass\\n"}}, "finish": null}'
+    )
+    delete_old = (
+        '{"thought": "remove the old path", "action": {"tool": "delete_file", '
+        '"input": {"path": "main.py"}}, "finish": null}'
+    )
+    llm = FakeLLMProvider(
+        responses=[_PLAN_RESPONSE, create_new, delete_old, _FINISH_AFTER_DELETE]
+    )
+    runner = AgentRunner(db_session, llm, tool_registry, max_iterations=6)
+
+    state = await runner.run(indexed_repository_id, "rename main.py to entrypoint.py")
+
+    assert state.status == AgentStatus.DONE
+    assert state.modified_files == ["entrypoint.py", "main.py"]
+    assert not (sample_repo / "main.py").exists()
+    assert (sample_repo / "entrypoint.py").is_file()

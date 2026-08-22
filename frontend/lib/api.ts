@@ -1,9 +1,17 @@
 import type {
+  ActiveModelsResponse,
   AgentDiffResponse,
   AgentEventOut,
   AgentRunSummary,
+  HealthResponse,
   IndexRunResult,
+  ModelRole,
+  ModelsResponse,
+  PostMessageResponse,
+  PullProgress,
   RepositorySummary,
+  SessionDetail,
+  SessionSummary,
   TestRunOut,
   ToolCallOut,
 } from "./types";
@@ -49,6 +57,36 @@ export const api = {
       body: JSON.stringify({ repository_id: repositoryId, task }),
     }),
 
+  listSessions: (repositoryId?: string) =>
+    request<SessionSummary[]>(
+      repositoryId ? `/api/sessions?repository_id=${encodeURIComponent(repositoryId)}` : "/api/sessions",
+    ),
+
+  createSession: (repositoryId: string, title?: string) =>
+    request<SessionSummary>("/api/sessions", {
+      method: "POST",
+      body: JSON.stringify({ repository_id: repositoryId, title }),
+    }),
+
+  getSession: (sessionId: string) => request<SessionDetail>(`/api/sessions/${sessionId}`),
+
+  renameSession: (sessionId: string, title: string) =>
+    request<SessionSummary>(`/api/sessions/${sessionId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
+
+  deleteSession: async (sessionId: string): Promise<void> => {
+    const res = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`, { method: "DELETE" });
+    if (!res.ok) throw new ApiError(res.status, `Could not delete session ${sessionId}`);
+  },
+
+  postMessage: (sessionId: string, content: string) =>
+    request<PostMessageResponse>(`/api/sessions/${sessionId}/messages`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
+
   getAgentRun: (runId: string) => request<AgentRunSummary>(`/api/agent/${runId}`),
 
   getAgentEvents: (runId: string) => request<AgentEventOut[]>(`/api/agent/${runId}/events`),
@@ -60,6 +98,58 @@ export const api = {
   getAgentToolCalls: (runId: string) => request<ToolCallOut[]>(`/api/agent/${runId}/tool-calls`),
 
   cancelAgentRun: (runId: string) => request<AgentRunSummary>(`/api/agent/${runId}/cancel`, { method: "POST" }),
+
+  health: () => request<HealthResponse>("/api/health"),
+
+  listModels: () => request<ModelsResponse>("/api/models"),
+
+  setActiveModel: (role: ModelRole, name: string, confirmReindex = false) =>
+    request<ActiveModelsResponse>("/api/models/active", {
+      method: "POST",
+      body: JSON.stringify({ role, name, confirm_reindex: confirmReindex }),
+    }),
+
+  deleteModel: (name: string) =>
+    request<ActiveModelsResponse>(`/api/models?name=${encodeURIComponent(name)}`, { method: "DELETE" }),
+
+  /** Downloads a model, invoking `onProgress` for each update the backend
+   * emits. Hand-rolled rather than EventSource: a pull is a POST, and
+   * EventSource can only issue GETs. Aborting `signal` drops the client's
+   * interest in the stream — the backend keeps downloading, and Ollama
+   * resumes rather than restarting if the pull is re-opened later. */
+  pullModel: async (
+    name: string,
+    onProgress: (progress: PullProgress) => void,
+    signal?: AbortSignal,
+  ): Promise<void> => {
+    const res = await fetch(`${API_BASE_URL}/api/models/pull`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+      signal,
+    });
+    if (!res.ok || !res.body) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new ApiError(res.status, body.detail ?? `Could not start the download of ${name}`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // A read can land mid-line, so the trailing fragment stays buffered
+      // until the newline that completes it arrives.
+      const lines = buffer.split("\n");
+      buffer = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.trim()) onProgress(JSON.parse(line) as PullProgress);
+      }
+    }
+    if (buffer.trim()) onProgress(JSON.parse(buffer) as PullProgress);
+  },
 };
 
 export { ApiError };

@@ -1,22 +1,55 @@
-from app.agents.state import AgentState, ToolCallRecord
+from app.agents.repetition import describe_call
+from app.agents.state import AgentState, ConversationTurn, ToolCallRecord
 from app.llm.base import Message
 from app.tools.base import ToolSpec
 
 _MAX_CONTENT_PREVIEW_CHARS = 800
 _MAX_RECENT_OBSERVATIONS = 12
+_MAX_LISTED_CALL_SIGNATURES = 25
+_MAX_CONVERSATION_TURNS = 8
+_MAX_TURN_PREVIEW_CHARS = 600
 
-_SYSTEM_PROMPT_TEMPLATE = """You are a software engineering agent investigating a reported issue in a \
-local repository. Gather evidence with the tools below before changing anything: read the relevant code, \
-understand the root cause, and only then make the smallest safe fix with apply_patch. Never cite a \
-location, or claim a root cause, you have not actually observed through a tool result.
+_SYSTEM_PROMPT_TEMPLATE = """You are a software engineering agent working on a local repository. Some tasks are \
+bug reports to diagnose; others simply ask you to write or change code. Either way: read the relevant \
+code first, then act. Gather only the evidence you actually need — enough to make the change correctly — \
+and then make the smallest safe change with apply_patch. Never cite a location, or claim a root cause, \
+you have not actually observed through a tool result.
 
 Available tools (you are already scoped to one repository — never include "repository_id" yourself):
 {tool_descriptions}
 
-apply_patch replaces an exact, unique excerpt of a file (old_content) with new content — it is not a \
-unified diff, and old_content must match the file's actual current content exactly (re-read the file \
-first if you're not sure). Prefer the smallest change that addresses the root cause over rewriting \
-whole functions.
+The search tools only ever look inside THIS repository's own indexed code. They are not a web search, \
+a reference manual, or a way to look up how to write an algorithm — if a query comes back with nothing \
+relevant, the answer is not in this repository and searching again with different wording will not find \
+it. Write the code yourself instead.
+
+search_code finds code by MEANING, not by filename — it embeds your query text and compares it against \
+what each chunk of code actually says, so searching for a literal path like "adv_calc.py" mostly checks \
+whether that string appears inside some file's content, not whether a file by that name exists. An empty \
+or irrelevant search_code result is never proof that a file is missing. To find out whether a specific \
+path exists, use list_files (to see what's actually in a directory) or read_file / get_file_context (to \
+open the exact path directly) — never conclude "this file does not exist" from search_code alone. Files \
+you (or an earlier run) create, change, or delete are re-indexed automatically, so search_code and \
+find_symbol reflect an edit on the very next call — but that only helps once you've actually looked; it \
+doesn't help if you never call list_files or read_file to check.
+
+Once you have read the code you need to change, change it. Re-reading it, or searching for a better way \
+to phrase what you already understand, is not progress — it burns the iteration budget and reaches no \
+conclusion. When the task asks you to add or fix code and you can see the code in your observations, the \
+next action is apply_patch, create_file, or delete_file.
+
+apply_patch replaces an exact, unique excerpt of an EXISTING file (old_content) with new content — it is \
+not a unified diff, and old_content must match the file's actual current content exactly (re-read the \
+file first if you're not sure). Prefer the smallest change that addresses the root cause over rewriting \
+whole functions. It cannot create a file that doesn't exist yet — for that, use create_file instead \
+(it also creates any missing parent directory, e.g. a repository with no tests/ folder yet). There is no \
+other way to create or delete a file: a shell command like touch, mkdir, or rm is not on the allowed \
+command list, and retrying one after it's rejected wastes iterations without ever succeeding.\n\nThere is no separate rename or move tool. To rename a file, call create_file ONCE with the new path \
+and the complete final content already in it, then delete_file the old path — do not leave the old file \
+behind and call that done. Never call create_file with empty or placeholder content meaning to fill it \
+in afterward: apply_patch cannot add content to an empty file (old_content can never match nothing), so \
+that leaves the file permanently stuck empty. Write the real, complete content in the same create_file \
+call that makes the file.
 
 After applying a patch, run_tests to check your work. If tests fail, read the failure (failed_tests, \
 failure_category) and iterate: adjust your patch and run_tests again, rather than finishing on a change \
@@ -130,9 +163,10 @@ def _summarize_output(tool_name: str, output: dict) -> str:
         lines = [f"{c['commit_hash'][:8]} {c['message']}" for c in commits]
         return f"{len(commits)} commit(s): " + "; ".join(lines)
 
-    if tool_name == "apply_patch":
+    if tool_name in ("apply_patch", "create_file", "delete_file"):
         stats = f"+{output.get('lines_added', 0)}/-{output.get('lines_removed', 0)} lines"
-        header = f"patched {output.get('path')} ({stats}, unverified — no test run yet)"
+        verb = {"apply_patch": "patched", "create_file": "created", "delete_file": "deleted"}[tool_name]
+        header = f"{verb} {output.get('path')} ({stats}, unverified — no test run yet)"
         return f"{header}:\n{_truncate(output.get('diff', ''))}"
 
     if tool_name == "run_tests":
@@ -172,6 +206,73 @@ def _truncate(text: str) -> str:
     return text[:_MAX_CONTENT_PREVIEW_CHARS] + "... [truncated]"
 
 
+def format_conversation(turns: list[ConversationTurn]) -> str:
+    """Render the session's earlier turns for the prompt.
+
+    Only the last few, and each one truncated: earlier turns are context for
+    *what is being asked now*, not evidence to reason from — this run gathers
+    its own evidence through tools. Letting a long session's full transcript
+    into every prompt would crowd out the observations that actually matter
+    and push the context window up for no gain.
+    """
+    if not turns:
+        return ""
+    recent = turns[-_MAX_CONVERSATION_TURNS:]
+    lines = []
+    for turn in recent:
+        label = "User" if turn.role == "user" else "You"
+        body = turn.content.strip()
+        if len(body) > _MAX_TURN_PREVIEW_CHARS:
+            body = body[:_MAX_TURN_PREVIEW_CHARS] + "... [truncated]"
+        lines.append(f"{label}: {body}")
+    dropped = len(turns) - len(recent)
+    header = "Earlier in this conversation"
+    if dropped:
+        header += f" (showing the last {len(recent)} of {len(turns)} turns)"
+    return (
+        f"{header} — the request below may refer back to it, but re-verify anything "
+        f"you intend to act on with a tool rather than trusting it:\n" + "\n".join(lines)
+    )
+
+
+def _wrap_up_threshold(max_iterations: int) -> int:
+    """How many iterations from the end to start telling the model to wrap
+    up. Proportional, not a fixed 2: with MAX_AGENT_ITERATIONS=100 a fixed
+    threshold fires at iteration 98, long after a stuck run is worth
+    salvaging. At least 2 so a short budget still gets a warning at all.
+    """
+    return max(2, max_iterations // 4)
+
+
+def _format_calls_already_made(state: AgentState) -> str:
+    """A flat list of every distinct call made this run, with the iterations
+    it happened on.
+
+    Observations are a sliding window of the most recent few, which is what
+    keeps the prompt small — but it means a model that starts repeating sees
+    a window full of its own repetitions and no memory of the distinct things
+    it tried twenty iterations ago. This list is outside the window and costs
+    one line per distinct call, so "what have I already tried" survives even
+    when the observation itself has scrolled off.
+    """
+    iterations_by_call: dict[str, list[int]] = {}
+    for record in state.tool_calls:
+        iterations_by_call.setdefault(describe_call(record.tool_name, record.input), []).append(record.iteration)
+
+    if not iterations_by_call:
+        return "Calls already made:\n(none yet — this is the first iteration)"
+
+    lines = []
+    for call, iterations in list(iterations_by_call.items())[-_MAX_LISTED_CALL_SIGNATURES:]:
+        where = ", ".join(str(i) for i in iterations)
+        lines.append(f"- {call} [iter {where}]")
+
+    return (
+        "Calls already made (repeating one with the same arguments returns the same result "
+        "and will be skipped, unless you have changed the repository since):\n" + "\n".join(lines)
+    )
+
+
 class ContextManager:
     """Builds the message list sent to the LLM each iteration, from
     AgentState rather than an ever-growing chat history. Only the most
@@ -195,16 +296,24 @@ class ContextManager:
 
         remaining = max_iterations - state.iteration
         budget_line = f"Iteration {state.iteration + 1} of {max_iterations} ({remaining} remaining after this one)."
-        if remaining <= 2:
+        if remaining <= _wrap_up_threshold(max_iterations):
             budget_line += (
                 " You are close to the iteration limit — if you have enough evidence to explain the root "
                 "cause, use 'finish' now rather than continuing to investigate."
             )
 
+        conversation_text = format_conversation(state.conversation)
+        conversation_block = f"{conversation_text}\n\n" if conversation_text else ""
+
         user = (
             f"{budget_line}\n\n"
+            f"{conversation_block}"
             f"Task:\n{state.task}\n\n"
-            f"Plan:\n{plan_text}\n\n"
+            f"Plan (a rough starting guide, written before any investigation — not a literal script. "
+            f"A step may already be satisfied by something in Observations below, may turn out not to "
+            f"apply, or may need to be done differently than worded. Decide your next action from what "
+            f"Observations actually show, not by restating a plan step verbatim):\n{plan_text}\n\n"
+            f"{_format_calls_already_made(state)}\n\n"
             f"Observations so far:\n{observations_text}\n\n"
             f"What do you want to do next?"
         )

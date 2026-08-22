@@ -19,7 +19,7 @@ async def health(
         app_name=settings.app_name,
         llm=LLMHealth(
             provider=settings.llm_provider,
-            model=settings.llm_model,
+            model=llm.model,
             reachable=llm_reachable,
         ),
     )

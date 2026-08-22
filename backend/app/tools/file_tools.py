@@ -38,7 +38,11 @@ class ListFilesTool(Tool):
         repo_root = get_repository_root(self._session, input_data.repository_id)
         target = resolve_safe_path(repo_root, input_data.path)
         if not target.is_dir():
-            raise ToolError(f"'{input_data.path}' is not a directory")
+            raise ToolError(
+                f"'{input_data.path}' is not a directory (it may not exist). "
+                "Use list_files(path=\"\") to see the repository root, or search_code / find_symbol "
+                "to locate something by name instead of guessing a path."
+            )
 
         iterator = target.rglob("*") if input_data.recursive else target.iterdir()
         entries = []
@@ -85,7 +89,11 @@ class ReadFileTool(Tool):
         repo_root = get_repository_root(self._session, input_data.repository_id)
         target = resolve_safe_path(repo_root, input_data.path)
         if not target.is_file():
-            raise ToolError(f"'{input_data.path}' is not a file")
+            raise ToolError(
+                f"'{input_data.path}' is not a file (it may not exist, or the path is wrong). "
+                "Use list_files(path=\"\") to see the repository root, or search_code / find_symbol "
+                "to locate the right file by name instead of guessing a path."
+            )
         if target.stat().st_size > self._max_file_size_bytes:
             raise ToolError(f"'{input_data.path}' exceeds the {self._max_file_size_bytes}-byte read limit")
 

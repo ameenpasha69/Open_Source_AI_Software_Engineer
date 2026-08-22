@@ -47,6 +47,15 @@ function TimelineRow({ event }: { event: AgentEventOut }) {
           mono
         />
       );
+    case "redundant_call_skipped":
+      return (
+        <Row
+          icon="⟳"
+          tone="warning"
+          text={`skipped ${p.tool} — already called at iteration ${p.first_called_at_iteration}, nothing changed since`}
+          mono
+        />
+      );
     case "invalid_decision":
       return <Row icon="⚠" tone="warning" text="Model response was invalid — retrying" />;
     case "finished":
@@ -104,9 +113,9 @@ export function AgentTimeline({ events, live }: { events: AgentEventOut[]; live:
   }, [events.length]);
 
   return (
-    <div className="flex h-full flex-col rounded-lg border border-border bg-surface">
-      <div className="flex items-center justify-between border-b border-border px-4 py-2">
-        <h3 className="text-sm font-semibold text-muted uppercase tracking-wide">Agent timeline</h3>
+    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border bg-surface">
+      <div className="flex shrink-0 items-center justify-between border-b border-border px-4 py-2.5">
+        <h3 className="text-xs font-semibold tracking-wide text-muted uppercase">Agent timeline</h3>
         {live && (
           <span className="flex items-center gap-1.5 text-xs text-accent">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" /> live

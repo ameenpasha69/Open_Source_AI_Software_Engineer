@@ -38,3 +38,36 @@ async def test_planner_filters_blank_steps():
     plan = await planner.create_plan("task", "repo")
 
     assert plan == ["Step one", "Step two"]
+
+
+async def test_planner_prompt_covers_non_bug_tasks_too():
+    # Regression: the prompt used to say "given a bug report," exclusively —
+    # for a task like "make this a scientific calculator and rename the
+    # file," the planner produced a generic SDLC plan (branch, design doc,
+    # peer review) with no step the agent could actually execute, and the
+    # agent looped re-doing step 1 forever since nothing else was actionable.
+    llm = FakeLLMProvider(responses=['{"steps": ["step"]}'])
+    planner = Planner(llm)
+
+    await planner.create_plan("task", "repo")
+
+    system_prompt = llm.received_messages[0][0].content
+    assert "bug" in system_prompt.lower()  # still covers bug reports...
+    assert "added, changed, renamed" in system_prompt.lower() or "renamed" in system_prompt.lower()
+
+
+async def test_planner_prompt_forbids_steps_with_no_real_capability():
+    llm = FakeLLMProvider(responses=['{"steps": ["step"]}'])
+    planner = Planner(llm)
+
+    await planner.create_plan("task", "repo")
+
+    system_prompt = llm.received_messages[0][0].content.lower()
+    assert "branch" in system_prompt
+    assert "peer review" in system_prompt
+
+
+async def test_fallback_plan_does_not_assume_a_bug_report():
+    # The fallback plan used to end on "form a hypothesis about the root
+    # cause" — meaningless for a task that isn't a bug at all.
+    assert not any("root cause" in step.lower() for step in _FALLBACK_PLAN)

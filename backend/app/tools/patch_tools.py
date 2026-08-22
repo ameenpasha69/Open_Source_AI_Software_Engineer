@@ -76,6 +76,21 @@ class ApplyPatchTool(Tool):
 
         occurrences = original.count(input_data.old_content)
         if occurrences == 0:
+            if original == "":
+                # A dead end otherwise: old_content can never match an empty
+                # file, and this tool cannot fill one in — observed live, a
+                # model created an empty placeholder via create_file, then
+                # spent the rest of its iteration budget trying to apply_patch
+                # content into it that could never match. Naming the actual
+                # recovery (start over with delete_file + create_file, or
+                # write the real content the first time) is the only way out.
+                raise ToolError(
+                    f"'{input_data.path}' is currently empty (0 bytes) — old_content can never match "
+                    "anything in an empty file, so apply_patch cannot be used to add content to it. "
+                    "Either delete_file this path and create_file it again with the full content in "
+                    "one call, or — better — call create_file with the complete content directly "
+                    "instead of creating an empty file first."
+                )
             message = (
                 f"old_content not found in '{input_data.path}' — it must match the file's "
                 "current content exactly. Re-read the file to confirm its current content."
@@ -98,6 +113,103 @@ class ApplyPatchTool(Tool):
         target.write_text(updated, encoding="utf-8")
 
         diff = _unified_diff(input_data.path, original, updated)
+        added, removed = _count_changes(diff)
+        return ApplyPatchOutput(path=input_data.path, diff=diff, lines_added=added, lines_removed=removed)
+
+
+class CreateFileInput(BaseModel):
+    repository_id: str
+    path: str
+    content: str = ""
+
+
+class CreateFileTool(Tool):
+    """Creates a new file — apply_patch's counterpart for when there's
+    nothing to replace yet.
+
+    Observed live: a model needing to add a test file had no valid way to do
+    it. `apply_patch` refuses on a nonexistent target (there's no old_content
+    to match), and the only other route, `run_command`, doesn't allow `touch`
+    — a reasonable restriction on its own, but one that left file creation
+    with no path at all, so the model looped on the exact same disallowed
+    command. This tool is a small, explicit, safe alternative: it plugs that
+    gap without widening the shell allowlist.
+    """
+
+    name = "create_file"
+    description = "Create a new file with the given content. Fails if the file already exists — use apply_patch to modify one."
+    input_schema = CreateFileInput
+    output_schema = ApplyPatchOutput
+    timeout_seconds = 10.0
+
+    def __init__(self, session: Session):
+        self._session = session
+
+    async def run(self, input_data: CreateFileInput) -> ApplyPatchOutput:
+        repo_root = get_repository_root(self._session, input_data.repository_id)
+        target = resolve_safe_path(repo_root, input_data.path)
+
+        if target.name in _DENIED_FILENAMES:
+            raise ToolError(f"Refusing to create '{input_data.path}': environment/secret files are protected")
+        if any(part in IGNORED_DIR_NAMES for part in target.relative_to(repo_root).parts[:-1]):
+            raise ToolError(f"Refusing to create '{input_data.path}': inside an ignored directory")
+        if target.exists():
+            raise ToolError(f"'{input_data.path}' already exists — use apply_patch to modify it")
+
+        # The missing directory is often exactly why the model reached for
+        # this tool in the first place (e.g. a repository with no tests/
+        # directory yet) — creating it here is what makes that case work in
+        # one call instead of needing a separate, unavailable mkdir step.
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(input_data.content, encoding="utf-8")
+
+        diff = _unified_diff(input_data.path, "", input_data.content)
+        added, removed = _count_changes(diff)
+        return ApplyPatchOutput(path=input_data.path, diff=diff, lines_added=added, lines_removed=removed)
+
+
+class DeleteFileInput(BaseModel):
+    repository_id: str
+    path: str
+
+
+class DeleteFileTool(Tool):
+    """Deletes a file — the one operation still missing after apply_patch
+    (modify) and create_file (add). Together they're what "rename" actually
+    is: create_file at the new path, then delete_file the old one. There is
+    no separate rename/move tool because a rename in this project's tasks is
+    rarely a pure move — it's usually paired with a content change (as it
+    was in the task that exposed this gap), so composing two explicit,
+    already-understood primitives is more predictable than one tool trying
+    to do both at once.
+    """
+
+    name = "delete_file"
+    description = "Delete a file. To rename one, create_file the new path and then delete_file the old path."
+    input_schema = DeleteFileInput
+    output_schema = ApplyPatchOutput
+    timeout_seconds = 10.0
+
+    def __init__(self, session: Session):
+        self._session = session
+
+    async def run(self, input_data: DeleteFileInput) -> ApplyPatchOutput:
+        repo_root = get_repository_root(self._session, input_data.repository_id)
+        target = resolve_safe_path(repo_root, input_data.path)
+
+        if target.name in _DENIED_FILENAMES:
+            raise ToolError(f"Refusing to delete '{input_data.path}': environment/secret files are protected")
+        if any(part in IGNORED_DIR_NAMES for part in target.relative_to(repo_root).parts[:-1]):
+            raise ToolError(f"Refusing to delete '{input_data.path}': inside an ignored directory")
+        if not target.exists():
+            raise ToolError(f"'{input_data.path}' does not exist — nothing to delete")
+        if not target.is_file():
+            raise ToolError(f"'{input_data.path}' is a directory, not a file — delete_file only removes files")
+
+        original = target.read_text(encoding="utf-8", errors="replace")
+        target.unlink()
+
+        diff = _unified_diff(input_data.path, original, "")
         added, removed = _count_changes(diff)
         return ApplyPatchOutput(path=input_data.path, diff=diff, lines_added=added, lines_removed=removed)
 

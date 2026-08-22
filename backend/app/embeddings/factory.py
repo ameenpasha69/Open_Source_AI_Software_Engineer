@@ -1,6 +1,9 @@
-from functools import lru_cache
+from fastapi import Depends
+from sqlalchemy.orm import Session
 
+from app.config.model_selection import get_active_model
 from app.config.settings import Settings, get_settings
+from app.database.session import get_db_session
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.ollama_provider import OllamaEmbeddingProvider
 
@@ -9,7 +12,8 @@ _PROVIDERS = {
 }
 
 
-def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
+def build_embedding_provider(settings: Settings, model: str | None = None) -> EmbeddingProvider:
+    """`model` overrides `settings.embedding_model` — see build_llm_provider."""
     provider_cls = _PROVIDERS.get(settings.embedding_provider)
     if provider_cls is None:
         raise ValueError(
@@ -18,11 +22,14 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
         )
     return provider_cls(
         base_url=settings.embedding_base_url,
-        model=settings.embedding_model,
+        model=model or settings.embedding_model,
         timeout_seconds=settings.llm_request_timeout_seconds,
     )
 
 
-@lru_cache
-def get_embedding_provider() -> EmbeddingProvider:
-    return build_embedding_provider(get_settings())
+def get_embedding_provider(
+    session: Session = Depends(get_db_session),
+    settings: Settings = Depends(get_settings),
+) -> EmbeddingProvider:
+    """Per-request, reading the active embedding model — see get_llm_provider."""
+    return build_embedding_provider(settings, model=get_active_model(session, settings, "embedding"))

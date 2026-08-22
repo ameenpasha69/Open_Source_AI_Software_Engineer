@@ -5,12 +5,16 @@ from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config.settings import Settings, get_settings
+from app.database.migrations import add_missing_columns
 from app.database.models import Base
 
 
 def create_sqlite_engine(database_url: str) -> Engine:
     engine = create_engine(database_url, connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
+    # create_all() adds missing tables but never missing columns, so an
+    # existing database silently stays behind the models — see migrations.py.
+    add_missing_columns(engine)
     return engine
 
 

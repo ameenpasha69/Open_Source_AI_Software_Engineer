@@ -57,16 +57,16 @@ export function CodePanel({ toolCalls }: { toolCalls: ToolCallOut[] }) {
   const snippets = extractSnippets(toolCalls);
 
   return (
-    <div className="flex h-full flex-col rounded-lg border border-border bg-surface">
-      <div className="border-b border-border px-4 py-2">
-        <h3 className="text-sm font-semibold text-muted uppercase tracking-wide">
+    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border bg-surface">
+      <div className="shrink-0 border-b border-border px-4 py-2.5">
+        <h3 className="text-xs font-semibold tracking-wide text-muted uppercase">
           Retrieved code ({snippets.length})
         </h3>
       </div>
       <div className="flex-1 space-y-3 overflow-y-auto p-4">
         {snippets.length === 0 && <p className="text-xs text-muted">Nothing retrieved yet.</p>}
         {snippets.map((s, i) => (
-          <div key={i} className="rounded-md border border-border">
+          <div key={i} className="rounded-lg border border-border">
             <div className="flex items-center justify-between border-b border-border bg-code-bg px-3 py-1.5 text-xs">
               <span className="font-mono text-foreground">
                 {s.filePath}:{s.startLine}-{s.endLine}

@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.agents.background import BackgroundAgentRunner, get_background_agent_runner
-from app.agents.runner import AgentRunner
+from app.agents.runner import AgentRunner, SessionNotFoundError
 from app.config.settings import Settings, get_settings
 from app.database.models import AgentEvent, AgentRun, AgentToolCall, TestRun
 from app.database.session import get_db_session, get_session_factory_dependency
@@ -50,22 +50,24 @@ async def run_agent(
     GET /api/agent/{run_id}/stream or poll GET /api/agent/{run_id}.
     """
     tool_registry = build_tool_registry(session, settings, embedding_provider)
-    runner = AgentRunner(session, llm, tool_registry, settings.max_agent_iterations)
+    runner = AgentRunner(
+        session, llm, tool_registry, settings.max_agent_iterations, settings, embedding_provider
+    )
     try:
-        run_row = runner.create_run(request.repository_id, request.task)
-    except RepositoryNotFoundError as exc:
+        run_row = runner.create_run(request.repository_id, request.task, request.session_id)
+    except (RepositoryNotFoundError, SessionNotFoundError) as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     background.launch(
         run_row.id,
-        _execute_in_background(
+        execute_in_background(
             run_row.id, request.repository_id, request.task, session_factory, settings, llm, embedding_provider
         ),
     )
-    return _to_summary(run_row)
+    return to_summary(run_row)
 
 
-async def _execute_in_background(
+async def execute_in_background(
     run_id: str,
     repository_id: str,
     task: str,
@@ -80,7 +82,9 @@ async def _execute_in_background(
     session = session_factory()
     try:
         tool_registry = build_tool_registry(session, settings, embedding_provider)
-        runner = AgentRunner(session, llm, tool_registry, settings.max_agent_iterations)
+        runner = AgentRunner(
+            session, llm, tool_registry, settings.max_agent_iterations, settings, embedding_provider
+        )
         await runner.execute(run_id, repository_id, task)
     finally:
         session.close()
@@ -108,7 +112,7 @@ async def cancel_agent_run(
             )
         session.refresh(run_row)
 
-    return _to_summary(run_row)
+    return to_summary(run_row)
 
 
 @router.get("/agent/{run_id}", response_model=AgentRunSummary)
@@ -116,7 +120,7 @@ async def get_agent_run(run_id: str, session: Session = Depends(get_db_session))
     run_row = session.get(AgentRun, run_id)
     if run_row is None:
         raise HTTPException(status_code=404, detail=f"Agent run '{run_id}' not found")
-    return _to_summary(run_row)
+    return to_summary(run_row)
 
 
 @router.get("/agent/{run_id}/events", response_model=list[AgentEventOut])
@@ -261,10 +265,11 @@ def _to_event_out(event: AgentEvent) -> AgentEventOut:
     )
 
 
-def _to_summary(run_row: AgentRun) -> AgentRunSummary:
+def to_summary(run_row: AgentRun) -> AgentRunSummary:
     return AgentRunSummary(
         id=run_row.id,
         repository_id=run_row.repository_id,
+        session_id=run_row.session_id,
         task=run_row.task,
         status=run_row.status,
         plan=json.loads(run_row.plan_json),
@@ -276,4 +281,9 @@ def _to_summary(run_row: AgentRun) -> AgentRunSummary:
         started_at=run_row.started_at,
         finished_at=run_row.finished_at,
         error=run_row.error,
+        model=run_row.model,
+        prompt_tokens=run_row.prompt_tokens,
+        completion_tokens=run_row.completion_tokens,
+        llm_call_count=run_row.llm_call_count,
+        peak_prompt_tokens=run_row.peak_prompt_tokens,
     )

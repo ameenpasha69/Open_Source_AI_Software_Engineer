@@ -4,6 +4,7 @@ import json
 from app.llm.factory import get_llm_provider
 from app.main import app
 from httpx import AsyncClient
+from sqlalchemy import select
 
 from tests.conftest import FakeLLMProvider, wait_for_agent_run
 
@@ -339,3 +340,113 @@ async def test_get_agent_run_tool_calls_for_unknown_run_returns_404(client):
     async with AsyncClient(transport=client, base_url="http://test") as http:
         resp = await http.get("/api/agent/does-not-exist/tool-calls")
     assert resp.status_code == 404
+
+
+# --- re-indexing after a write --------------------------------------------
+#
+# Regression coverage: a file the agent (or an earlier run) had just created
+# was invisible to that same agent's own search_code — nothing re-indexed
+# after a write. Observed live, repeatedly: the model correctly searched,
+# got nothing back (because the file was never indexed, not because it was
+# missing), and confidently reported the file "does not exist."
+
+_CREATE_FILE_ACTION = (
+    '{"thought": "add a helper", "action": {"tool": "create_file", '
+    '"input": {"path": "helper.py", "content": "def helper():\\n    return 42\\n"}}, "finish": null}'
+)
+
+
+async def test_a_file_created_by_the_agent_is_indexed_without_a_manual_reindex(client, sample_repo):
+    from app.database.models import IndexedFile
+    from app.database.session import get_db_session
+
+    repository_id = await _index(client, sample_repo)
+    _use_scripted_llm([_PLAN_RESPONSE, _CREATE_FILE_ACTION, _FINISH_RESPONSE])
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "add a helper"})
+        await wait_for_agent_run(run_resp.json()["id"])
+
+    session = next(app.dependency_overrides[get_db_session]())
+    indexed = session.scalars(
+        select(IndexedFile).where(
+            IndexedFile.repository_id == repository_id, IndexedFile.relative_path == "helper.py"
+        )
+    ).first()
+    assert indexed is not None
+    assert indexed.chunk_count > 0
+
+
+async def test_a_file_deleted_by_the_agent_is_removed_from_the_index(client, sample_repo):
+    from app.database.models import IndexedFile
+    from app.database.session import get_db_session
+
+    repository_id = await _index(client, sample_repo)
+    delete_action = (
+        '{"thought": "remove it", "action": {"tool": "delete_file", "input": {"path": "main.py"}}, "finish": null}'
+    )
+    _use_scripted_llm([_PLAN_RESPONSE, delete_action, _FINISH_RESPONSE])
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "remove main.py"})
+        await wait_for_agent_run(run_resp.json()["id"])
+
+    session = next(app.dependency_overrides[get_db_session]())
+    indexed = session.scalars(
+        select(IndexedFile).where(
+            IndexedFile.repository_id == repository_id, IndexedFile.relative_path == "main.py"
+        )
+    ).first()
+    assert indexed is None
+
+
+async def test_search_code_finds_a_file_the_same_run_just_created(client, sample_repo):
+    """The actual end-to-end point of re-indexing: a later tool call in the
+    *same* run can find what an earlier tool call in that run just wrote."""
+    find_after_create_action = (
+        '{"thought": "confirm it is there", '
+        '"action": {"tool": "search_code", "input": {"query": "def helper(): return 42"}}, "finish": null}'
+    )
+    _use_scripted_llm([_PLAN_RESPONSE, _CREATE_FILE_ACTION, find_after_create_action, _FINISH_RESPONSE])
+    repository_id = await _index(client, sample_repo)
+
+    async with AsyncClient(transport=client, base_url="http://test") as http:
+        run_resp = await http.post("/api/agent/run", json={"repository_id": repository_id, "task": "add a helper"})
+        run_id = run_resp.json()["id"]
+        await wait_for_agent_run(run_id)
+        calls_resp = await http.get(f"/api/agent/{run_id}/tool-calls")
+
+    search_call = next(c for c in calls_resp.json() if c["tool_name"] == "search_code")
+    assert search_call["success"] is True
+    results = search_call["output"]["results"]
+    assert any(r["file_path"] == "helper.py" for r in results)
+
+
+async def test_reindex_failure_after_a_write_does_not_fail_the_run(client, sample_repo):
+    """Best-effort: an embedding backend that fails mid-run must degrade
+    search, not the write that already succeeded."""
+    from app.embeddings.base import EmbeddingProvider
+    from app.embeddings.factory import get_embedding_provider
+
+    class BrokenEmbeddingProvider(EmbeddingProvider):
+        @property
+        def model(self) -> str:
+            return "broken"
+
+        async def embed_text(self, text: str) -> list[float]:
+            raise ConnectionError("embedding backend is down")
+
+        async def embed_documents(self, texts: list[str]) -> list[list[float]]:
+            raise ConnectionError("embedding backend is down")
+
+        async def health_check(self) -> bool:
+            return False
+
+    repository_id = await _index(client, sample_repo)
+    app.dependency_overrides[get_embedding_provider] = lambda: BrokenEmbeddingProvider()
+    _use_scripted_llm([_PLAN_RESPONSE, _CREATE_FILE_ACTION, _FINISH_RESPONSE])
+
+    result = await _run_agent_and_wait(client, repository_id, "add a helper")
+
+    assert result["status"] == "done"
+    assert result["modified_files"] == ["helper.py"]

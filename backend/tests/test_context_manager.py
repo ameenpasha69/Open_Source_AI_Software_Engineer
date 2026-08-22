@@ -156,3 +156,98 @@ def test_format_tool_signature_handles_optional_union_type():
     )
     signature = _format_tool_signature(spec)
     assert "start_line: integer = None" in signature
+
+
+# --- loop-prevention context (regression: run d5ada39 looped 45 iterations) ---
+
+
+def _record(iteration: int, tool: str, input_data: dict) -> ToolCallRecord:
+    return ToolCallRecord(
+        iteration=iteration,
+        tool_name=tool,
+        input=input_data,
+        result=ToolResult(tool_name=tool, success=True, output={"results": []}, duration_seconds=0.0),
+    )
+
+
+def test_prompt_lists_calls_already_made():
+    state = AgentState(
+        run_id="r",
+        task="t",
+        repository_id="repo",
+        tool_calls=[_record(1, "search_code", {"query": "palindrome"})],
+    )
+    messages = ContextManager().build_messages(state, [], max_iterations=10)
+
+    assert "search_code(query='palindrome') [iter 1]" in messages[1].content
+
+
+def test_repeated_calls_are_collapsed_into_one_line_naming_every_iteration():
+    state = AgentState(
+        run_id="r",
+        task="t",
+        repository_id="repo",
+        tool_calls=[_record(i, "search_code", {"query": "palindrome"}) for i in (2, 5, 9)],
+    )
+    messages = ContextManager().build_messages(state, [], max_iterations=10)
+
+    assert "search_code(query='palindrome') [iter 2, 5, 9]" in messages[1].content
+
+
+def test_calls_already_made_survives_the_observation_window():
+    # The whole point: the observation window is the most recent few, so a
+    # model that starts looping loses sight of what it tried early on. This
+    # list has to outlive that.
+    state = AgentState(
+        run_id="r",
+        task="t",
+        repository_id="repo",
+        tool_calls=[_record(1, "read_file", {"path": "palindrome.py"})],
+        observations=[f"[iter {i}] filler observation" for i in range(2, 40)],
+    )
+    messages = ContextManager().build_messages(state, [], max_iterations=100)
+
+    assert "[iter 1] filler observation" not in messages[1].content  # scrolled out, as designed
+    assert "read_file(path='palindrome.py') [iter 1]" in messages[1].content
+
+
+def test_first_iteration_says_so_rather_than_listing_nothing():
+    state = AgentState(run_id="r", task="t", repository_id="repo")
+    messages = ContextManager().build_messages(state, [], max_iterations=10)
+
+    assert "Calls already made:\n(none yet" in messages[1].content
+
+
+def test_wrap_up_warning_is_proportional_to_a_large_budget():
+    # With MAX_AGENT_ITERATIONS=100 the old fixed threshold of 2 only fired at
+    # iteration 98, far too late to salvage a run.
+    state = AgentState(run_id="r", task="t", repository_id="repo", iteration=80)
+    messages = ContextManager().build_messages(state, [], max_iterations=100)
+
+    assert "close to the iteration limit" in messages[1].content
+
+
+def test_no_wrap_up_warning_early_in_a_large_budget():
+    state = AgentState(run_id="r", task="t", repository_id="repo", iteration=10)
+    messages = ContextManager().build_messages(state, [], max_iterations=100)
+
+    assert "close to the iteration limit" not in messages[1].content
+
+
+def test_short_budgets_still_get_a_wrap_up_warning():
+    state = AgentState(run_id="r", task="t", repository_id="repo", iteration=2)
+    messages = ContextManager().build_messages(state, [], max_iterations=4)
+
+    assert "close to the iteration limit" in messages[1].content
+
+
+def test_prompt_tells_the_model_the_plan_is_a_guide_not_a_script():
+    # Regression: a static, unmarked plan restated verbatim every iteration
+    # let the model anchor on plan step 1 ("review calc.py") as "the next
+    # thing to do" even after Observations already satisfied it — it kept
+    # re-reading the file instead of advancing, iteration after iteration.
+    state = AgentState(run_id="r", task="t", repository_id="repo", plan=["Read the file", "Change it"])
+    messages = ContextManager().build_messages(state, [], max_iterations=10)
+
+    assert "not a literal script" in messages[1].content
+    assert "Decide your next action from what" in messages[1].content

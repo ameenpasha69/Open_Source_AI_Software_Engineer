@@ -7,11 +7,15 @@ from pydantic import BaseModel
 class RunAgentRequest(BaseModel):
     repository_id: str
     task: str
+    # When set, the run sees the session's earlier turns as context and
+    # writes its answer back into that session's transcript.
+    session_id: str | None = None
 
 
 class AgentRunSummary(BaseModel):
     id: str
     repository_id: str
+    session_id: str | None = None
     task: str
     status: str
     plan: list[str]
@@ -23,6 +27,11 @@ class AgentRunSummary(BaseModel):
     started_at: datetime.datetime
     finished_at: datetime.datetime | None
     error: str | None
+    model: str | None = None
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    llm_call_count: int = 0
+    peak_prompt_tokens: int = 0
 
 
 class AgentEventOut(BaseModel):

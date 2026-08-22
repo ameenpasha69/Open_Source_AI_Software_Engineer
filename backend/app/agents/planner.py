@@ -6,19 +6,27 @@ from app.llm.base import LLMProvider, Message
 logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT = (
-    "You are a senior software engineer. Given a bug report and a repository name, "
-    "produce a short investigation plan — 3 to 6 concrete steps a systematic engineer "
-    "would take to locate the root cause before proposing a fix. Do not propose a fix yet.\n\n"
+    "You are planning the first few steps for an autonomous coding agent working alone in one "
+    "repository — no branches, no design-document step, no peer review, no ticket system. It reads "
+    "and searches code, applies changes directly to files, and can run tests if a test command is "
+    "configured. Given a task and a repository name, write 3 to 6 concrete steps, each one something "
+    "this agent can actually do with those capabilities: read/search for the relevant code, work out "
+    "what needs to change, make the change, and verify it if a test command exists. Never include a "
+    "step with no corresponding capability here (branching, a design document, peer review, filing a "
+    "ticket) — every step must cash out as reading/searching, changing a file, or running tests.\n\n"
+    "The task may be a bug report to diagnose, or it may simply ask for code to be added, changed, "
+    "renamed, or rewritten — plan for whichever this one actually is; do not assume it is always a "
+    "bug to investigate. Do not propose the actual fix or content yet, just the steps to get there.\n\n"
     'Respond with ONLY a JSON object matching this schema: {"steps": [string, ...]}. '
     "No prose outside the JSON."
 )
 
 _FALLBACK_PLAN = [
-    "Search the codebase semantically for code related to the reported issue.",
+    "Search the codebase semantically for code related to the task.",
     "Read the most relevant files in full to understand the surrounding logic.",
-    "Look for the specific function or code path the issue describes.",
-    "Check recent git history and diffs for anything that could explain the behavior.",
-    "Form a hypothesis about the root cause, citing specific file and line locations.",
+    "Locate the specific function, file, or code path the task concerns.",
+    "Work out exactly what needs to change, citing specific file and line locations.",
+    "Make the change, then run tests to verify it if a test command is configured.",
 ]
 
 

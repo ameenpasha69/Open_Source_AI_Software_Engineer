@@ -58,6 +58,15 @@ async def test_list_files_on_a_file_raises(db_session, nested_repository):
         await tool.run(ListFilesInput(repository_id=nested_repository.id, path="README.md"))
 
 
+async def test_list_files_on_a_nonexistent_path_suggests_how_to_recover(db_session, nested_repository):
+    # Regression: a model that guesses a wrong directory (e.g. prefixing the
+    # repository's own name onto every path) got a bare "not a directory"
+    # with nothing to correct from, and repeated the same wrong guess.
+    tool = ListFilesTool(db_session)
+    with pytest.raises(ToolError, match="search_code / find_symbol"):
+        await tool.run(ListFilesInput(repository_id=nested_repository.id, path="does/not/exist"))
+
+
 async def test_read_file_returns_full_content_by_default(db_session, nested_repository):
     tool = ReadFileTool(db_session, max_file_size_bytes=1_000_000)
     result = await tool.run(ReadFileInput(repository_id=nested_repository.id, path="src/main.py"))
@@ -93,6 +102,12 @@ async def test_read_file_missing_file_raises(db_session, nested_repository):
     tool = ReadFileTool(db_session, max_file_size_bytes=1_000_000)
     with pytest.raises(ToolError, match="not a file"):
         await tool.run(ReadFileInput(repository_id=nested_repository.id, path="does_not_exist.py"))
+
+
+async def test_read_file_missing_file_suggests_how_to_find_the_right_path(db_session, nested_repository):
+    tool = ReadFileTool(db_session, max_file_size_bytes=1_000_000)
+    with pytest.raises(ToolError, match="search_code / find_symbol"):
+        await tool.run(ReadFileInput(repository_id=nested_repository.id, path="repo_name/main.py"))
 
 
 async def test_get_file_context_centers_window_on_line(db_session, nested_repository):

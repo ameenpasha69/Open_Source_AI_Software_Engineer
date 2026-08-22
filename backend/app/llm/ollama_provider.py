@@ -21,6 +21,10 @@ class OllamaProvider(LLMProvider):
         self._timeout = timeout_seconds
         self._default_temperature = default_temperature
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     async def generate(
         self,
         messages: list[Message],

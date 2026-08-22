@@ -17,6 +17,10 @@ class OllamaEmbeddingProvider(EmbeddingProvider):
         self._model = model
         self._timeout = timeout_seconds
 
+    @property
+    def model(self) -> str:
+        return self._model
+
     async def embed_text(self, text: str) -> list[float]:
         return (await self.embed_documents([text]))[0]
 

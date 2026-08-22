@@ -3,6 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, field_validator, model_validator
 
+from app.llm.usage import TokenUsage
 from app.tools.base import ToolResult
 
 
@@ -11,6 +12,10 @@ class AgentStatus(StrEnum):
     DONE = "done"
     FAILED = "failed"
     MAX_ITERATIONS_REACHED = "max_iterations_reached"
+    # Stopped early because the agent kept re-issuing calls it had already
+    # made against an unchanged repository — it was not going to converge,
+    # and letting it run out the iteration budget just costs LLM calls.
+    NO_PROGRESS = "no_progress"
     CANCELLED = "cancelled"
 
 
@@ -83,6 +88,15 @@ class TestRunRecord(BaseModel):
     failure_category: str
 
 
+class ConversationTurn(BaseModel):
+    """One earlier turn of the session this run belongs to. Kept separate
+    from `observations` on purpose: observations are this run's own evidence,
+    a turn is something the user and the agent already settled."""
+
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class AgentState(BaseModel):
     """Explicit, structured agent memory — not a raw conversation transcript.
     Every field here is something a caller (API response, DB row, the next
@@ -93,12 +107,19 @@ class AgentState(BaseModel):
     run_id: str
     task: str
     repository_id: str
+    # Earlier turns of the session, oldest first. Empty for a standalone run.
+    conversation: list[ConversationTurn] = []
     plan: list[str] = []
     observations: list[str] = []
     tool_calls: list[ToolCallRecord] = []
     modified_files: list[str] = []
     test_results: list[TestRunRecord] = []
     iteration: int = 0
+    # Consecutive iterations whose chosen action was a call already made
+    # since the last repository change. Reset by any call that actually ran.
+    consecutive_redundant_calls: int = 0
+    usage: TokenUsage = TokenUsage()
+    model: str | None = None
     status: AgentStatus = AgentStatus.RUNNING
     final_answer: str | None = None
     root_cause: str | None = None

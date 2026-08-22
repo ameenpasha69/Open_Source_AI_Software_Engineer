@@ -27,6 +27,16 @@ class LLMProvider(ABC):
     registering it in `factory.py` — the agent runtime is untouched.
     """
 
+    @property
+    @abstractmethod
+    def model(self) -> str:
+        """The model this instance is bound to.
+
+        Providers are built per request from the user's active selection, so
+        this — not `Settings.llm_model` — is what actually answered a given
+        call, and what /api/health should report.
+        """
+
     @abstractmethod
     async def generate(
         self,

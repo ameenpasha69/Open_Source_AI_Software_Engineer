@@ -11,8 +11,7 @@ from app.database.session import get_db_session
 from app.embeddings.base import EmbeddingProvider
 from app.embeddings.factory import get_embedding_provider
 from app.retrieval.command_detection import detect_default_commands
-from app.retrieval.embedding_pipeline import EmbeddingPipeline
-from app.retrieval.indexer import RepositoryIndexer, RepositoryNotFoundError
+from app.retrieval.reindex import RepositoryNotFoundError, reindex_repository
 from app.schemas.indexing import IndexRepositoryRequest, IndexRunResult, RepositorySummary
 
 router = APIRouter(tags=["repositories"])
@@ -25,25 +24,12 @@ async def index_repository(
     settings: Settings = Depends(get_settings),
     embedding_provider: EmbeddingProvider = Depends(get_embedding_provider),
 ) -> IndexRunResult:
-    indexer = RepositoryIndexer(
-        session=session,
-        chunk_max_lines=settings.chunk_max_lines,
-        chunk_overlap_lines=settings.chunk_overlap_lines,
-        max_file_size_bytes=settings.max_indexable_file_size_bytes,
-    )
     try:
-        result = indexer.index(Path(request.path), name=request.name)
+        result = await reindex_repository(session, settings, embedding_provider, Path(request.path), request.name)
     except RepositoryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     if result.status == "completed":
-        pipeline = EmbeddingPipeline(
-            session=session, embedding_provider=embedding_provider, vector_index_dir=settings.vector_index_dir
-        )
-        # Chunking already succeeded and is persisted regardless of what happens
-        # here — an unreachable embedding backend degrades search, it doesn't
-        # lose indexing work.
-        result.embedding = await pipeline.sync(result.repository_id)
         _apply_command_config(session, result.repository_id, request)
         session.commit()
 

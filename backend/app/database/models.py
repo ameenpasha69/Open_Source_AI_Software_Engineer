@@ -115,6 +115,10 @@ class AgentRun(Base):
 
     id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
     repository_id: Mapped[str] = mapped_column(ForeignKey("repositories.id"))
+    # Nullable: a run can still be started standalone (the eval harness does
+    # exactly that). A run inside a session also sees that session's earlier
+    # turns as context.
+    session_id: Mapped[str | None] = mapped_column(ForeignKey("chat_sessions.id"))
     task: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(String(32), default="running")
     plan_json: Mapped[str] = mapped_column(Text, default="[]")
@@ -128,6 +132,16 @@ class AgentRun(Base):
     started_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     finished_at: Mapped[datetime.datetime | None] = mapped_column(DateTime(timezone=True))
     error: Mapped[str | None] = mapped_column(Text)
+
+    # As reported by the inference backend, summed over every LLM call the run
+    # made (the plan plus one per iteration, plus any JSON-repair retries).
+    prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    completion_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    llm_call_count: Mapped[int] = mapped_column(Integer, default=0)
+    # The largest single prompt this run sent — what a context-window gauge
+    # actually means, unlike the running total.
+    peak_prompt_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    model: Mapped[str | None] = mapped_column(String(255))
 
     events: Mapped[list["AgentEvent"]] = relationship(back_populates="run", cascade="all, delete-orphan")
     tool_calls: Mapped[list["AgentToolCall"]] = relationship(back_populates="run", cascade="all, delete-orphan")
@@ -219,3 +233,69 @@ class TestRun(Base):
     created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     run: Mapped[AgentRun | None] = relationship(back_populates="test_runs")
+
+
+class AppSetting(Base):
+    """A single mutable application preference, keyed by name.
+
+    Settings (`app/config/settings.py`) stays the source of the *defaults* —
+    it's read-only, per-machine, and loaded from .env. A row here is a
+    runtime override the user chose in the UI (currently: which pulled model
+    the agent and the indexer use), which has to outlive a server restart.
+    """
+
+    __tablename__ = "app_settings"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+
+class ChatSession(Base):
+    """A named conversation against one repository.
+
+    Sessions are what make the agent conversational rather than one-shot: a
+    run started inside a session is given the session's earlier turns as
+    context, so "now also handle the empty case" resolves against what was
+    just discussed instead of starting from nothing. The repository is fixed
+    at creation — it's what scopes retrieval, so letting it change mid-session
+    would silently invalidate every earlier turn's evidence.
+    """
+
+    __tablename__ = "chat_sessions"
+    __table_args__ = (Index("ix_chat_sessions_repository_id", "repository_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    repository_id: Mapped[str] = mapped_column(ForeignKey("repositories.id"))
+    title: Mapped[str] = mapped_column(String(255), default="New session")
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    updated_at: Mapped[datetime.datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    repository: Mapped[Repository] = relationship()
+    messages: Mapped[list["ChatMessage"]] = relationship(
+        back_populates="session", cascade="all, delete-orphan", order_by="ChatMessage.created_at"
+    )
+
+
+class ChatMessage(Base):
+    """One turn in a session. A user turn is what someone typed; an assistant
+    turn is the answer an agent run produced, linked back to that run so the
+    full timeline, diff, and test output stay reachable from the transcript.
+    """
+
+    __tablename__ = "chat_messages"
+    __table_args__ = (Index("ix_chat_messages_session_id", "session_id"),)
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uuid)
+    session_id: Mapped[str] = mapped_column(ForeignKey("chat_sessions.id"))
+    role: Mapped[str] = mapped_column(String(16))  # "user" | "assistant"
+    content: Mapped[str] = mapped_column(Text, default="")
+    # Assistant turns only — the run that produced this answer.
+    run_id: Mapped[str | None] = mapped_column(ForeignKey("agent_runs.id"))
+    created_at: Mapped[datetime.datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+    session: Mapped[ChatSession] = relationship(back_populates="messages")

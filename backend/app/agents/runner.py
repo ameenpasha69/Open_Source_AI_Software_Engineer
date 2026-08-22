@@ -3,38 +3,92 @@ import datetime
 import json
 import logging
 import time
+from pathlib import Path
 
 from pydantic import ValidationError
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents.context_manager import ContextManager, format_observation
 from app.agents.planner import Planner
+from app.agents.repetition import describe_call, find_redundant_call
 from app.agents.state import (
     AgentAction,
     AgentDecision,
     AgentState,
     AgentStatus,
+    ConversationTurn,
     TestRunRecord,
     ToolCallRecord,
 )
 from app.agents.termination import check_termination
+from app.config.settings import Settings
 from app.database.models import (
     AgentEvent,
     AgentRun,
     AgentToolCall,
+    ChatMessage,
+    ChatSession,
     ModifiedFile,
     Repository,
     TestRun,
 )
+from app.embeddings.base import EmbeddingProvider
 from app.llm.base import LLMProvider, Message
 from app.llm.exceptions import LLMProviderError
+from app.llm.usage import UsageTrackingLLMProvider
 from app.observability.logging import run_id_var
 from app.retrieval.indexer import RepositoryNotFoundError
+from app.retrieval.reindex import reindex_repository
 from app.tools.base import ToolExecutor, ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 _MAX_DECISION_PARSE_ATTEMPTS = 2
+
+_NO_ANSWER_FALLBACK = {
+    AgentStatus.MAX_ITERATIONS_REACHED: "I ran out of iterations before reaching a conclusion.",
+    AgentStatus.NO_PROGRESS: (
+        "I stopped because I was repeating myself instead of making progress. "
+        "If code search kept coming back empty, the repository may need re-indexing."
+    ),
+    AgentStatus.CANCELLED: "This run was cancelled.",
+    AgentStatus.FAILED: "This run failed before I could reach a conclusion.",
+    AgentStatus.RUNNING: "This run did not complete.",
+    AgentStatus.DONE: "This run finished without an answer.",
+}
+
+
+class SessionNotFoundError(Exception):
+    pass
+
+
+# How much to raise decoding temperature per consecutive redundant call, and
+# the ceiling on how high that climbs.
+_REDUNDANCY_TEMPERATURE_STEP = 0.25
+_MAX_REDUNDANCY_TEMPERATURE = 0.9
+
+
+def _decision_temperature(state: AgentState) -> float | None:
+    """None defers to the provider's configured default (kept low — this
+    task rewards precision, not creativity) for an ordinary iteration. But
+    low temperature is *why* a stuck model stays stuck: observed live
+    (qwen2.5-coder:7b, a rename+rewrite task) — after a call got skipped as
+    redundant, the corrective observation was appended to the prompt exactly
+    as designed, and the model's next response was still, word for word, the
+    same thought and the same tool call. At temperature 0.2 with grammar-
+    constrained JSON decoding, a few new lines appended near the end of an
+    otherwise-unchanged, fairly long prompt often isn't enough to move the
+    argmax path — the corrective text was present and correct, and still
+    couldn't win. Raising temperature specifically once a repeat has already
+    happened gives the model an actual chance to sample a different
+    continuation, without touching the default the rest of the time.
+    """
+    if state.consecutive_redundant_calls == 0:
+        return None
+    return min(
+        _REDUNDANCY_TEMPERATURE_STEP * (state.consecutive_redundant_calls + 1), _MAX_REDUNDANCY_TEMPERATURE
+    )
 
 
 class AgentRunner:
@@ -48,16 +102,32 @@ class AgentRunner:
     after seeing a failure.
     """
 
-    def __init__(self, session: Session, llm: LLMProvider, tool_registry: ToolRegistry, max_iterations: int):
+    def __init__(
+        self,
+        session: Session,
+        llm: LLMProvider,
+        tool_registry: ToolRegistry,
+        max_iterations: int,
+        settings: Settings | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
+    ):
         self._session = session
-        self._llm = llm
+        # Wrapped once here so the planner and the loop feed the same counter
+        # without either of them knowing they're metered.
+        self._llm = UsageTrackingLLMProvider(llm)
         self._tool_registry = tool_registry
         self._tool_executor = ToolExecutor(tool_registry)
         self._context_manager = ContextManager()
-        self._planner = Planner(llm)
+        self._planner = Planner(self._llm)
         self._max_iterations = max_iterations
+        # Both optional, and both required together, to re-index after a
+        # write (see _reindex_after_write) — every real caller has them, but
+        # tests that only exercise read-only tools shouldn't need to supply
+        # an embedding provider just to construct a runner.
+        self._settings = settings
+        self._embedding_provider = embedding_provider
 
-    def create_run(self, repository_id: str, task: str) -> AgentRun:
+    def create_run(self, repository_id: str, task: str, session_id: str | None = None) -> AgentRun:
         """Creates and commits the AgentRun row synchronously, before any LLM
         call — so a caller (the API route) has a real run_id to return to the
         client immediately, whether or not `execute()` then runs inline or is
@@ -65,15 +135,23 @@ class AgentRunner:
         repository = self._session.get(Repository, repository_id)
         if repository is None:
             raise RepositoryNotFoundError(f"Repository '{repository_id}' not found")
-        run_row = AgentRun(repository_id=repository_id, task=task, status=AgentStatus.RUNNING.value)
+        if session_id is not None and self._session.get(ChatSession, session_id) is None:
+            raise SessionNotFoundError(f"Session '{session_id}' not found")
+        run_row = AgentRun(
+            repository_id=repository_id,
+            session_id=session_id,
+            task=task,
+            status=AgentStatus.RUNNING.value,
+            model=self._llm.model,
+        )
         self._session.add(run_row)
         self._session.commit()
         return run_row
 
-    async def run(self, repository_id: str, task: str) -> AgentState:
+    async def run(self, repository_id: str, task: str, session_id: str | None = None) -> AgentState:
         """Create the run and execute it inline, end to end. Used directly by
         tests and by any caller that wants to simply await the whole thing."""
-        run_row = self.create_run(repository_id, task)
+        run_row = self.create_run(repository_id, task, session_id)
         return await self.execute(run_row.id, repository_id, task)
 
     async def execute(self, run_id: str, repository_id: str, task: str) -> AgentState:
@@ -86,7 +164,13 @@ class AgentRunner:
         """
         run_row = self._session.get(AgentRun, run_id)
         repository = self._session.get(Repository, repository_id)
-        state = AgentState(run_id=run_id, task=task, repository_id=repository_id)
+        state = AgentState(
+            run_id=run_id,
+            task=task,
+            repository_id=repository_id,
+            conversation=self._load_conversation(run_row),
+            model=self._llm.model,
+        )
 
         token = run_id_var.set(run_id)
         started = time.monotonic()
@@ -101,6 +185,12 @@ class AgentRunner:
                     termination = check_termination(state, self._max_iterations)
                     if termination is not None:
                         state.status = termination
+                        if termination is AgentStatus.NO_PROGRESS:
+                            state.error = (
+                                f"Stopped after {state.consecutive_redundant_calls} consecutive tool calls "
+                                "that had already been made against an unchanged repository — the agent was "
+                                "repeating itself rather than converging."
+                            )
                         break
                     await self._run_iteration(run_row, state)
                     self._session.commit()
@@ -131,12 +221,33 @@ class AgentRunner:
         finally:
             run_id_var.reset(token)
 
+    def _load_conversation(self, run_row: AgentRun) -> list[ConversationTurn]:
+        """Earlier turns of this run's session, if it has one.
+
+        Deliberately excludes the user message that *started* this run — that
+        text is already the task, and repeating it as conversation history
+        would have the model treating its own current instruction as
+        something previously agreed.
+        """
+        if run_row.session_id is None:
+            return []
+        messages = self._session.scalars(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == run_row.session_id)
+            .order_by(ChatMessage.created_at)
+        ).all()
+        return [
+            ConversationTurn(role=m.role, content=m.content)
+            for m in messages
+            if m.run_id != run_row.id and m.content.strip()
+        ]
+
     async def _run_iteration(self, run_row: AgentRun, state: AgentState) -> None:
         state.iteration += 1
         self._emit_event(run_row.id, state.iteration, "iteration_started", {})
 
         messages = self._context_manager.build_messages(state, self._tool_registry.list_specs(), self._max_iterations)
-        decision, last_error = await self._get_decision(messages)
+        decision, last_error = await self._get_decision(messages, temperature=_decision_temperature(state))
 
         if decision is None:
             # Carries the actual validation error into next iteration's
@@ -164,6 +275,12 @@ class AgentRunner:
     async def _execute_action(self, run_row: AgentRun, state: AgentState, action: AgentAction) -> None:
         self._emit_event(run_row.id, state.iteration, "tool_called", {"tool": action.tool, "input": action.input})
 
+        repeat_of = find_redundant_call(state, action.tool, action.input)
+        if repeat_of is not None:
+            self._skip_redundant_call(run_row, state, action, repeat_of)
+            return
+        state.consecutive_redundant_calls = 0
+
         # repository_id is always the run's own repository, never something
         # the LLM should have to (or be trusted to) supply — this also means
         # the agent can never be tricked into acting on a different repo.
@@ -174,13 +291,78 @@ class AgentRunner:
         state.observations.append(format_observation(record))
         self._persist_tool_call(run_row.id, record)
 
-        if action.tool == "apply_patch" and result.success:
+        if action.tool in ("apply_patch", "create_file", "delete_file") and result.success:
             self._record_modified_file(run_row.id, state, result.output)
+            await self._reindex_after_write(state)
         elif action.tool == "run_tests" and result.success:
             self._record_test_run(run_row.id, state, result.output)
 
         self._emit_event(
             run_row.id, state.iteration, "tool_completed", {"tool": action.tool, "success": result.success}
+        )
+
+    async def _reindex_after_write(self, state: AgentState) -> None:
+        """Keeps the agent's own search_code/find_symbol in sync with what it
+        just wrote — otherwise a file the agent itself just created or
+        changed is invisible to its own tools until someone re-indexes by
+        hand. Observed live, repeatedly: a model asked to act on a file it
+        (or an earlier run) had just written concluded the file "does not
+        exist" purely because search_code came back empty, and never
+        reached for list_files/read_file to check directly. Re-indexing
+        after every write doesn't fix that reasoning mistake on its own —
+        see the system prompt for that half — but it does mean search stops
+        being reliably wrong immediately after the one thing most likely to
+        make it wrong.
+
+        Best-effort: a re-index failure (e.g. the embedding backend is
+        unreachable) must never fail the run over it. The write itself
+        already succeeded and is what's persisted; search staying stale is a
+        degraded, recoverable state, not a reason to abort.
+        """
+        if self._settings is None or self._embedding_provider is None:
+            return
+        repository = self._session.get(Repository, state.repository_id)
+        if repository is None:
+            return
+        try:
+            await reindex_repository(self._session, self._settings, self._embedding_provider, Path(repository.path))
+        except Exception:
+            logger.warning("re-index after write failed", exc_info=True)
+
+    def _skip_redundant_call(
+        self, run_row: AgentRun, state: AgentState, action: AgentAction, repeat_of: int
+    ) -> None:
+        """Answer a call the agent has already made, without spending it.
+
+        The point is the observation: telling the model *which* iteration
+        already answered this, and that nothing has changed since, is what
+        breaks the loop — silently re-running the tool just feeds it the same
+        result and it asks again. Not executing also means no ToolCallRecord,
+        so the original call stays the single record of that result.
+        """
+        state.consecutive_redundant_calls += 1
+        observation = (
+            f"[iter {state.iteration}] {describe_call(action.tool, action.input)} -> SKIPPED: "
+            f"identical to the call you already made at iteration {repeat_of}, and nothing in the "
+            f"repository has changed since, so the result would be identical. Repeating it cannot "
+            f"tell you anything new. Do something different: apply a fix with apply_patch, look at "
+            f"a different file, or finish with what you already know."
+        )
+        state.observations.append(observation)
+        self._emit_event(
+            run_row.id,
+            state.iteration,
+            "redundant_call_skipped",
+            {"tool": action.tool, "input": action.input, "first_called_at_iteration": repeat_of},
+        )
+        logger.warning(
+            "skipped redundant tool call",
+            extra={
+                "tool": action.tool,
+                "iteration": state.iteration,
+                "first_called_at_iteration": repeat_of,
+                "consecutive_redundant_calls": state.consecutive_redundant_calls,
+            },
         )
 
     def _record_modified_file(self, run_id: str, state: AgentState, output: dict) -> None:
@@ -223,10 +405,12 @@ class AgentRunner:
             )
         )
 
-    async def _get_decision(self, messages: list[Message]) -> tuple[AgentDecision | None, str | None]:
+    async def _get_decision(
+        self, messages: list[Message], temperature: float | None = None
+    ) -> tuple[AgentDecision | None, str | None]:
         last_error: str | None = None
         for _ in range(_MAX_DECISION_PARSE_ATTEMPTS):
-            response = await self._llm.generate(messages, json_mode=True)
+            response = await self._llm.generate(messages, temperature=temperature, json_mode=True)
             try:
                 return AgentDecision.model_validate(json.loads(response.content)), None
             except (json.JSONDecodeError, ValidationError) as exc:
@@ -267,7 +451,13 @@ class AgentRunner:
         )
 
     def _persist_final(self, run_row: AgentRun, state: AgentState) -> None:
+        state.usage = self._llm.usage
         run_row.status = state.status.value
+        run_row.prompt_tokens = state.usage.prompt_tokens
+        run_row.completion_tokens = state.usage.completion_tokens
+        run_row.llm_call_count = state.usage.call_count
+        run_row.peak_prompt_tokens = state.usage.peak_prompt_tokens
+        run_row.model = state.model
         run_row.plan_json = json.dumps(state.plan)
         run_row.final_answer = state.final_answer
         run_row.root_cause = state.root_cause
@@ -276,4 +466,27 @@ class AgentRunner:
         run_row.error = state.error
         run_row.finished_at = datetime.datetime.now(datetime.UTC)
         self._session.add(run_row)
+        self._record_assistant_turn(run_row, state)
         self._session.commit()
+
+    def _record_assistant_turn(self, run_row: AgentRun, state: AgentState) -> None:
+        """Write this run's outcome back into its session's transcript.
+
+        Every terminal status gets a turn, not just a successful one — a
+        session where the failed turns are missing reads as though they never
+        happened, and the next turn's context would be quietly wrong.
+        """
+        if run_row.session_id is None:
+            return
+        existing = self._session.scalars(
+            select(ChatMessage).where(ChatMessage.run_id == run_row.id)
+        ).first()
+        content = state.final_answer or state.error or _NO_ANSWER_FALLBACK[state.status]
+        if existing is not None:
+            existing.content = content
+            return
+        self._session.add(
+            ChatMessage(
+                session_id=run_row.session_id, role="assistant", content=content, run_id=run_row.id
+            )
+        )

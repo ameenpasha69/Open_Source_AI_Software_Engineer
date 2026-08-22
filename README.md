@@ -27,7 +27,14 @@ implemented:**
 - ✅ **Milestone 10** — Evaluation framework (ground-truth-independent scoring against real Ollama runs)
 - ✅ **Milestone 11** — Observability (structured logs, request/run correlation) + Docker sandboxing hardening
 
-This is the full 11-milestone roadmap this project was scoped from.
+This is the full 11-milestone roadmap this project was scoped from. Built on
+top of it, outside that roadmap: **in-app model management** — install, switch
+between, and remove local models from the UI instead of editing `.env` (see
+[Model management](#model-management)), and **chat sessions** — a persistent,
+repository-scoped conversation with its own history, token accounting, and
+context-window gauge (see
+[Sessions](#sessions-chat-history-token-usage-and-the-context-window)).
+
 Everything below describes what's actually implemented and verified, not
 aspirational design — see [Limitations](#limitations-current-milestone) for
 what's honestly still missing or rough within each of these.
@@ -196,6 +203,8 @@ class Tool(ABC):
 | `get_git_diff` | Working-tree or staged diff, optionally scoped to a path |
 | `get_git_log` | Recent commit history, optionally scoped to a path |
 | `apply_patch` | Replace an exact, unique excerpt of a file's content (Milestone 7 — see Code modification) |
+| `create_file` | Create a new file (content + missing parent dirs), refusing to overwrite one that exists |
+| `delete_file` | Delete a file; combined with `create_file` this is how a rename is done — there is no separate rename/move tool |
 | `run_tests` | Run the configured test command; structured pass/fail + failure category (Milestone 8) |
 | `run_command` | Run an allowlisted command (`python`, `pytest`, `ruff`, `npm`, ...) (Milestone 8) |
 | `run_linter` | Run the configured linter (Milestone 8) |
@@ -285,7 +294,10 @@ succeeded, and it correctly converged on `FaissVectorStore.delete` in
 ## Code modification
 
 The agent can now change code, via a new `apply_patch` tool
-(`app/tools/patch_tools.py`) and `GET /api/agent/{run_id}/diff`.
+(`app/tools/patch_tools.py`) and `GET /api/agent/{run_id}/diff`. A sibling tool, `create_file`, was added
+later for the case `apply_patch` structurally can't handle — creating a file
+that doesn't exist yet — see
+[Two more gaps the loop guard exposed](#two-more-gaps-the-loop-guard-exposed).
 
 **Search-and-replace with context validation, not a unified diff.** Spec
 section 10 asks for "validate the expected surrounding context" before
@@ -487,8 +499,8 @@ event.
 the run is still writing to the DB. Verified live against a real in-flight
 Ollama call: cancelling interrupted it in ~1s and persisted `"cancelled"`.
 
-**The frontend** (`frontend/`, Next.js + TypeScript + Tailwind) is a
-single-page dashboard: a repository sidebar, a task input, and five tabs —
+**The frontend** (`frontend/`, Next.js + TypeScript + Tailwind) has two
+views. **Workspace** is a repository sidebar, a task input, and five tabs —
 Timeline (the live SSE feed), Code (snippets the agent actually retrieved,
 via a new `GET /api/agent/{run_id}/tool-calls` detail endpoint), Diff, Tests,
 and a synthesized Final Report (summary, root cause, changes made, tests,
@@ -497,6 +509,326 @@ browser against a real Ollama-backed run with a deliberately introduced bug:
 the timeline streamed real reasoning and tool calls live, and all four
 detail tabs rendered correctly from the same run — including a correctly
 colored diff and a `verified` badge once tests passed.
+
+**Models** is the install-and-switch page described under
+[Model management](#model-management). The header carries a quick switch for
+the reasoning model on every view, since which model is about to run is
+context you want while writing the task, not something to go looking for.
+Theming is light/dark/system with the choice applied by an inline `<head>`
+script before first paint — without it a dark-mode user gets a white flash on
+every load.
+
+## Sessions: chat history, token usage, and the context window
+
+The agent used to be one-shot. You described an issue, it ran, you read the
+report, and the next thing you asked started from nothing — "now also handle
+the empty case" had no idea what "also" referred to. A **session** fixes that:
+a named conversation pinned to one repository, holding the transcript, the
+runs behind it, and what all of it cost.
+
+**A session is the unit of context.** A run started inside one is handed the
+session's earlier turns alongside the same repository-scoped retrieval tools,
+so the two halves of what the agent knows — the project (RAG) and the
+conversation (history) — arrive together. The repository is fixed at creation,
+because it's what scopes retrieval: letting it change mid-session would
+silently invalidate every earlier turn's evidence.
+
+History is deliberately not the whole transcript. Only the last few turns
+make it into the prompt, each truncated, under a header that tells the model
+to re-verify anything it intends to act on with a tool. Earlier turns are
+context for *what is being asked now*, not evidence to reason from — this run
+gathers its own. Letting a long session's full history into every prompt
+would crowd out the observations that matter and inflate the context window
+for nothing. The turn that *started* the current run is excluded too: that
+text is already the task, and replaying it as history would have the model
+treating its own instruction as something previously agreed.
+
+**Every terminal status writes a turn**, not just a successful one. A
+transcript that silently drops the runs that failed reads as though they never
+happened, and the next turn's context would be quietly wrong.
+
+**Token accounting** comes from the backend's own reported usage
+(`prompt_eval_count` / `eval_count`), never a client-side estimate — an
+approximation is worse than useless for a context gauge, whose entire job is
+knowing how close a prompt came to a real limit. Rather than threading a
+counter through the planner and the loop separately, `AgentRunner` wraps its
+provider once in a `UsageTrackingLLMProvider`; nothing that calls `generate()`
+knows it's being metered.
+
+**The context-window gauge shows the peak single prompt, not the session
+total.** This matters: a session's cumulative tokens routinely exceed the
+window several times over without any individual request being anywhere near
+it, so a total-over-limit meter would read 400% and mean nothing. Peak is the
+number that actually predicts a truncated prompt. The limit is read from the
+backend first (it knows the real window for the exact tag installed) and falls
+back to the catalog; when neither has it, the UI shows the raw count and no
+percentage rather than a percentage of a number nobody verified.
+
+The frontend is now a chat: a sidebar of projects and their sessions, a
+transcript, and a composer. Each assistant turn shows its status, iteration
+count, token spend, and model inline, and expands into the run's full
+timeline, retrieved code, diff, and test output — a claim you can't check is
+worth less than one you can. Detail is fetched only when expanded, so a long
+transcript doesn't fire four requests per turn for panels nobody opened.
+
+Verified live end to end against Ollama: two turns in one session, where the
+second question ("what did I ask you about in my previous message?") was
+answered from the conversation rather than re-derived — 20,389 tokens across
+14 model calls, peak prompt 2,105 of the model's 32,768-token window (6.4%).
+
+### The upgrade bug this exposed
+
+Adding those columns broke every existing installation, and no test caught it.
+`Base.metadata.create_all()` creates missing **tables** and stops there — it
+will never add a **column** to a table that already exists. Tests all passed
+because each one builds its schema from scratch; a real `data/app.db` from the
+previous release hit `no such column: agent_runs.session_id` on the first
+query.
+
+`app/database/migrations.py` now runs on every engine open and adds any column
+the models declare and the database lacks. It is deliberately not Alembic:
+this schema is one SQLite file that only ever grows columns, and a migration
+framework would add a dependency, a versions directory, and a step to forget,
+to solve a problem that is one `ALTER TABLE ADD COLUMN` per field. The
+subtleties it does handle are the ones that bite:
+
+- A `NOT NULL` column has to arrive with a **SQL** default. A Python-side
+  `default=0` only applies to rows this process inserts, so existing rows would
+  come back NULL and fail to load as an int.
+- Callable defaults (`uuid4().hex`, `utcnow()`) can't be table defaults, so
+  those columns are added without one.
+- Foreign-key clauses are omitted: SQLite only accepts `REFERENCES` on an added
+  column when the default is NULL, and doesn't enforce foreign keys at all
+  unless `PRAGMA foreign_keys=ON`.
+- Reflection runs on **the same connection as the DDL**. Inspecting via
+  `inspect(engine)` takes a second pooled connection whose view of the schema
+  can lag the one being altered — which surfaces as the contradictory pair
+  "`get_columns` says the column is missing" and "`ALTER` says duplicate
+  column". That cost a debugging session; it's why the inspector is built
+  inside the transaction.
+
+If this schema ever needs a column dropped, a type changed, or data backfilled,
+that is the point to swap in a real migration tool rather than extend this one.
+
+## Loop prevention: not asking the same question twice
+
+Observed live, and the reason this section exists: a run against a small
+repository issued the *identical* `search_code(query="convert integer to
+string without str")` call **17 times in a row**, ran for 45 iterations,
+never called `apply_patch`, and finished by declaring the task impossible.
+Nothing in the loop noticed. `check_termination` only knew about the
+iteration budget, and with `MAX_AGENT_ITERATIONS=100` that is not a backstop,
+it is a blank cheque.
+
+Three things were compounding:
+
+1. **Nothing detected repetition.** A tool call with unchanged inputs against
+   an unchanged repository returns exactly what it returned before, so
+   re-running it cannot move the agent forward — it can only spend an
+   iteration and an LLM call.
+2. **The observation window hid the loop from the model.** Context is the
+   most recent 12 observations, which is what keeps the prompt small. But a
+   model that has started repeating sees a window full of nothing *but* its
+   own repetitions, and no memory of the distinct things it tried twenty
+   iterations earlier. The context manager was actively erasing the evidence
+   the model needed to notice it was stuck.
+3. **The wrap-up warning fired far too late.** `remaining <= 2` with a budget
+   of 100 means the "you're running out of iterations, finish up" nudge
+   arrives at iteration 98.
+
+`app/agents/repetition.py` answers a repeated call instead of executing it.
+The observation the agent gets back names the iteration that already answered
+it and says why re-running is pointless — that message is the actual fix;
+silently re-running the tool just feeds the model the same result and it asks
+again. The check keys on *"has anything changed since?"*, not on banning
+repeats outright: re-running `run_tests` with identical arguments after a
+patch is the core self-correction move and stays allowed, because a
+successful `apply_patch` / `run_command` / `run_formatter` invalidates every
+earlier observation. The same call with **nothing** changed in between is the
+pathology.
+
+Three consecutive redundant calls ends the run with a new terminal status,
+`no_progress`, carrying the reason on the run row. Two in a row is a stumble
+the model can recover from; three is a loop. The context manager also now
+lists every distinct call made this run — outside the observation window, one
+line per call with the iterations it happened on — so "what have I already
+tried" survives the window scrolling, and the wrap-up threshold is
+proportional (`max_iterations // 4`) instead of a fixed 2.
+
+The same investigation turned up two things that were *causing* the model to
+loop rather than being the loop itself, both now addressed in the system
+prompt:
+
+- **Search tools were being used as a web search.** The model's thoughts made
+  it explicit — it was querying `search_code` for *how to write* a
+  palindrome algorithm. The tools only ever look inside this repository's own
+  indexed code, so every rephrasing came back with the same irrelevant chunk.
+  The prompt now says so, and says to write the code instead.
+- **The framing was investigate-first, unconditionally.** The prompt opened
+  with "investigating a reported issue," which is right for a bug report and
+  wrong for "write the code for X." It now covers both, and says explicitly
+  that once you have read the code you need to change, the next action is
+  `apply_patch` — re-reading it is not progress.
+
+Measured on the original failing task, same repository, same model
+(`qwen2.5-coder:7b`): **45 iterations → 7**, stopping with an honest
+`no_progress` instead of a confidently wrong "this is not feasible."
+Re-running it on `qwen2.5-coder:14b` completes the task in 7 iterations —
+and the trace shows the mechanism working as intended: the model tried to
+re-read a file it had already read, got the skip observation, and applied the
+patch on the very next iteration.
+
+**A caveat worth stating plainly:** this bounds a loop and gives the model a
+reason to break out of one. It does not make a model that will not act, act.
+On the harder end, a 7B model still stops without applying a patch on tasks
+a 14B model completes — the fix converts a 45-iteration wrong answer into a
+7-iteration honest failure, which is the right outcome, not a substitute for
+a capable enough model.
+
+## Two more gaps the loop guard exposed
+
+The guard above stops a stuck run quickly, which had a side effect worth
+documenting: it surfaced two *different* real failures in minutes instead of
+burying them in dozens of identical retries.
+
+**A model that hallucinates a path gets a bare "not found" and nothing to
+correct from.** Live trace, `llama3.2:latest`, task about the `is_palindrome`
+function: the model guessed `read_file(path="fastapi/main.py")` — prefixing
+the repository's own name onto the path, and inventing a `main.py` that
+doesn't exist in this repo at all — then, on failure, guessed
+`list_files(path="fastapi/", recursive=true)`, which also failed, and
+repeated that exact call three more times before the redundancy guard
+stopped it. `search_code` or `find_symbol` would have found the real file (a
+top-level `palindrome.py`) immediately; the model never reached for either,
+and the bare `ToolError` messages — `"'...' is not a file"`,
+`"'...' is not a directory"` — gave it nothing to reconsider. `list_files`
+and `read_file` (`app/tools/file_tools.py`) now append a concrete next step
+to that error: try `list_files(path="")` to see the real repository root, or
+`search_code` / `find_symbol` to locate something by name instead of
+guessing a path. Small, and not a fix for the underlying tendency to guess —
+but it's the same category of fix as `apply_patch`'s closest-match hint
+above, applied one layer earlier: an error a model can act on beats one it
+can only repeat.
+
+**There was no way to create a file, at all.** Live trace, `qwen2.5-coder:7b`,
+asked to add tests: it correctly found there was no `tests/test_palindrome.py`,
+correctly tried `run_command(["touch", "tests/test_palindrome.py"])`, and hit
+the allowlist — `touch` is deliberately not on it (`app/execution/subprocess_runner.py`).
+Its very next thought correctly identified *why* ("the command 'touch' is not
+allowed"), and it then repeated the identical disallowed command four more
+times anyway, until the redundancy guard stopped it at 11 iterations having
+created nothing. The allowlist rejection was correct — the actual bug is that
+nothing else could have worked either: `apply_patch` refuses a target that
+`is_file()` fails (`"'...' is not a file"`), and even past that, refuses empty
+`old_content`, so it can't write into a fresh empty file. There was no valid
+sequence of existing tool calls that creates a file. `create_file`
+(`app/tools/patch_tools.py`) closes that gap directly: it takes a path and
+content, refuses to overwrite something that already exists (that's still
+`apply_patch`'s job), creates any missing parent directory (the repository
+had no `tests/` folder at all — this is what makes that case succeed in one
+call), and is denied on the same env-file and ignored-directory checks
+`apply_patch` already enforces. It reuses `apply_patch`'s diff machinery
+(against an empty "before"), so a created file shows up in the Diff tab and
+counts toward `modified_files` / `verification_status` exactly like a patch
+does — the runner tracks both the same way
+(`action.tool in ("apply_patch", "create_file")`). The system prompt now
+says so explicitly, including that a shell command is not a way around this:
+retrying a rejected `touch` or `mkdir` will keep failing, since neither is on
+the allowed command list.
+
+Both are documented as gaps rather than "fixed" outright: the first is a
+better error message, not a guarantee the model won't still guess wrong; the
+second closes one specific missing capability, not a claim that every
+possible file operation now exists.
+
+## A rename task, and what it actually took to get partway there
+
+Live trace, `qwen2.5-coder:7b`: "make calc.py into a scientific calculator
+and rename it to adv_calc.py." This one task, investigated end to end,
+surfaced four more distinct problems layered on top of each other — worth
+walking through in the order they were found, since each fix changed what
+the *next* run's failure looked like.
+
+**The static plan became something the model restated instead of tracked.**
+First attempt: 4 iterations, all four re-issuing `read_file(path="calc.py")`
+— including three the redundancy guard correctly skipped. The planner's
+step 1 was, verbatim, "Review the current implementation in `calc.py` to
+understand its functionality and limitations" — and the model's thought at
+*every* iteration was a close paraphrase of exactly that sentence, despite
+already having the file's content in its own observations. The user
+message renders the full plan, unmarked, every single iteration
+(`app/agents/context_manager.py`) — nothing distinguishes "step 1, already
+satisfied" from "step 1, still to do." Two fixes: the prompt now tells the
+model explicitly that the plan is a rough starting guide, not a script to
+restate, and to decide its next action from Observations instead; and the
+planner's own system prompt (`app/agents/planner.py`) — which said "given a
+*bug report*... produce an *investigation* plan... to locate the *root
+cause*" — was rewritten to cover a task that simply asks for code to be
+added, changed, or renamed, and constrained to steps this agent can actually
+execute (no "create a branch," "write a design document," or "get peer
+review" — none of which have a tool here, and the generic plan this task
+produced was full of them).
+
+**Low temperature can keep a model repeating itself even after a corrective
+observation is added to the prompt.** Once the plan was fixed, the model
+still occasionally repeated a just-skipped call word for word — same
+thought, same input. At the default decoding temperature (0.2, chosen for
+precision on ordinary iterations), a few new lines appended near the end of
+an otherwise-unchanged, fairly long prompt often aren't enough to move the
+argmax path. `_decision_temperature()` in `app/agents/runner.py` now raises
+temperature specifically on the decision call made right after a redundant
+call was skipped — escalating with each consecutive repeat, capped at 0.9 —
+so the model gets an actual chance to sample something different, without
+touching the default the rest of the time. This is a real, tested
+mitigation; on the exact task above it was not sufficient by itself, which
+is why the next two fixes exist.
+
+**"Rename" has no single tool, and there was no way to remove the old
+path.** apply_patch (modify) and create_file (add) left one CRUD primitive
+missing. The model's own plan, once fixed to be tool-grounded, still said
+"Rename `calc.py` to `adv_calc.py`" — because a rename *is* one of this
+agent's real capabilities conceptually, just not one with a single matching
+tool. `delete_file` (`app/tools/patch_tools.py`) is the other half:
+same safety checks as apply_patch, refuses on a missing or already-deleted
+path, and — deliberately — there's still no dedicated rename/move tool,
+because in practice a rename here is rarely a pure move; it's paired with a
+content change, so composing `create_file` (new path, new content) +
+`delete_file` (old path) is more predictable than one tool trying to do a
+move and a rewrite at once. The system prompt says so explicitly.
+
+**A model can hallucinate a tool, land on the right two tools anyway, and
+still create a permanent dead end.** Handed `create_file`/`delete_file`,
+the model called a `rename_file` tool that doesn't exist first (a strong
+enough prior from other agent frameworks that the explicit "there is no
+rename tool" instruction didn't prevent it) — `ToolExecutor` returned
+`Unknown tool 'rename_file'. Available: [...]`, which correctly listed
+`create_file`, and the model recovered from *that* on its own. But it then
+called `create_file(path="adv_calc.py", content="")` — an empty placeholder,
+meaning to fill it in afterward — and there is no way to add content to an
+empty file: `apply_patch` refuses empty `old_content` by design (it's the
+one thing that can never uniquely identify a location), so old_content can
+never match nothing. That's a real dead end, not just an unhelpful error, so
+`apply_patch` (`app/tools/patch_tools.py`) now detects a zero-byte target
+specifically and names the only two ways out: delete and recreate with the
+full content in one call, or — better — never create the placeholder in the
+first place. The system prompt was strengthened to say exactly that: write
+the complete content in the same `create_file` call that makes the file.
+
+**What's still an open, undecided problem: a model can finish and be
+wrong.** With all four fixes in place, the same task ran to `"done"` in 12
+iterations — genuinely better content this time (real `sin`/`cos`/`log`
+functions via `math`) — but the model abandoned the empty `adv_calc.py`
+partway through without deleting it, patched the real content into `calc.py`
+in place instead, and then reported: *"The file 'calc.py' has been
+successfully renamed to 'adv_calc.py'."* That's false — `calc.py` still
+existed under its original name, and `adv_calc.py` was still empty. Nothing
+in this system checks a `finish` decision's claims against what actually
+happened on disk before accepting it. This is left as a known limitation
+(see below), not patched here: the general version of this problem — an
+LLM's self-reported completion isn't grounded in verified state — is a hard,
+open one, and a narrow fix aimed at this one task (e.g. requiring a
+`list_files` call before any `finish` that mentions a rename) would fix the
+symptom for this task without addressing the actual gap.
 
 ## Evaluation framework
 
@@ -683,6 +1015,76 @@ docker build -f docker/sandbox.Dockerfile -t local-ai-softeng-sandbox:latest .
 SANDBOX_BACKEND=docker ./scripts/start.sh
 ```
 
+## Model management
+
+Choosing a local model is a real experiment — the same task on
+`qwen2.5-coder:7b` and `qwen2.5-coder:14b` produces visibly different plans,
+tool choices, and patch quality. Making that comparison mean editing `.env`
+and restarting the server made it something you do once and never again, so
+models are now installed and switched from the UI.
+
+**`GET /api/models`** returns three things in one call: what's installed on
+the backend, which model each role currently uses, and a curated catalog of
+models available to pull. It answers `200` even when the inference backend is
+unreachable, with `backend.error` carrying the reason — a stopped Ollama is
+the exact state this page exists to help fix, and blanking the page would
+make "Ollama is down" indistinguishable from "this feature is broken".
+
+The catalog (`app/llm/catalog.py`) is hand-maintained rather than scraped
+from a registry: it works with no network, and every entry is a model picked
+as sensible for *this* application (code understanding, patching, retrieval)
+with the metadata needed to choose — parameter count, download size, context
+window, embedding dimensions, and a rough memory floor so nobody pulls 20GB
+onto an 8GB laptop. Users are never limited to it; anything installed on the
+backend is listed and usable whether it's catalogued or not, with
+`infer_role()` falling back to a name heuristic to tell embedding models from
+chat models.
+
+**`POST /api/models/pull`** streams the download as NDJSON, one progress
+object per line. NDJSON rather than SSE here because a pull is a mutation and
+so has to be a POST, and `EventSource` can only issue GETs — the frontend
+parses the stream with a `fetch` reader instead. A pull that fails part-way
+still answers `200`: the failure is delivered in-band, after headers are
+already on the wire, so an exception at that point would strand the UI with
+no reason shown.
+
+**`POST /api/models/active`** switches the model for a role. It's resolved at
+**request scope**, in `get_llm_provider()` — which is what makes a switch safe
+mid-flight. A background agent run was handed its provider when it started, so
+switching models never changes the model underneath a run in progress; the
+change applies to the next one. The choice is persisted in an `app_settings`
+row rather than rewritten into `.env`: `Settings` stays the read-only,
+per-machine default, and a read falls through to it whenever no override
+exists, so a fresh database behaves exactly as it did before this table
+existed.
+
+Two switches are refused rather than silently done:
+
+- **A model that isn't installed, or can't fill the role** (`404`/`400`) —
+  much cheaper to catch here than as a 404 from the backend halfway through
+  an agent run. If the backend can't be reached to *verify* installation, the
+  switch is refused with `503` rather than applied on faith.
+- **Changing the embedding model while vectors exist** (`409`). Vectors from
+  two different embedding models aren't comparable and usually aren't even
+  the same size (768-dim for `nomic-embed-text`, 1024-dim for `bge-m3`), so
+  the existing index is worthless and, worse, would *reject* the new model's
+  vectors on the next index run. Re-sending with `confirm_reindex: true`
+  drops every `VectorRecord` row **and** deletes the `.faiss` files — both
+  halves are required, since a `VectorRecord` row is exactly what tells the
+  embedding pipeline a chunk is already embedded, so leaving the rows would
+  silently keep the old model's vectors forever. The response names the
+  repositories that need re-indexing, and the UI puts that text in a
+  confirmation dialog before anything is destroyed.
+
+**`DELETE /api/models?name=`** removes a model from disk, refusing to delete
+one that's currently in use so a run can't fail on a model that vanished.
+
+Verified live against a real Ollama instance: listing seven installed models
+with correct roles/sizes/quantizations, switching the reasoning model from
+the header and seeing it reflected in `GET /api/models`, and a pull of a
+nonexistent tag streaming `pulling manifest` followed by a terminal
+`pull model manifest: file does not exist`.
+
 ## Hardware / model defaults
 
 Defaults were chosen for a machine with 16GB+ RAM and no dedicated GPU
@@ -690,8 +1092,10 @@ requirement (tested on Apple Silicon, 36GB RAM):
 
 - `LLM_MODEL=qwen2.5-coder:7b` — good code/tool-calling quality at a size that
   keeps per-iteration latency low, which matters because the agent calls the
-  LLM many times per run. `qwen2.5-coder:14b` or `32b` are drop-in upgrades
-  via `.env` if your hardware and patience allow — no code changes needed.
+  LLM many times per run. `qwen2.5-coder:14b` or `32b` are drop-in upgrades if
+  your hardware and patience allow — install and switch to them from the
+  Models page (see [Model management](#model-management)), or set `LLM_MODEL`
+  in `.env` to change the default. No code changes either way.
 - `EMBEDDING_MODEL=nomic-embed-text` — served by the same local Ollama
   instance, avoiding an extra heavy dependency (torch/sentence-transformers)
   for embeddings alone.
@@ -738,6 +1142,11 @@ All configuration lives in `.env` (see `.env.example`), loaded via
 timeouts, and agent iteration limits are all environment-driven so different
 models/settings can be compared without touching code.
 
+The one setting with a runtime override is the active model per role: the UI
+writes it to an `app_settings` row, and `Settings.llm_model` /
+`Settings.embedding_model` become the *defaults* a read falls back to. See
+[Model management](#model-management).
+
 ## Testing
 
 ```bash
@@ -763,22 +1172,25 @@ own import-path detection. Neither requires activating a workaround manually.
 backend/
   app/
     config/      # environment-driven settings
-    llm/         # LLMProvider abstraction + Ollama backend
-    database/    # SQLAlchemy models + session management (SQLite)
+    llm/         # LLMProvider + ModelManager abstractions, Ollama backends, model catalog, token metering
+    database/    # SQLAlchemy models, session management (SQLite), additive column migrations
     embeddings/  # EmbeddingProvider abstraction + Ollama backend
     retrieval/   # repository walker, chunker, FAISS vector store, embedding pipeline
     tools/       # Tool/ToolRegistry/ToolExecutor + file, code-search, git, patch, and execution tools
     execution/   # sandboxed subprocess runner — subprocess or Docker backend, allowlist, timeouts, output caps
     api/routes/  # FastAPI routers
     schemas/     # Pydantic request/response models
-    agents/      # AgentRunner, Planner, ContextManager, state, termination logic, background execution
+    agents/      # AgentRunner, Planner, ContextManager, state, termination + loop detection, background execution
     evaluation/  # eval task loader, ground-truth test snapshots, scoring, CLI runner
     observability/ # structured logging (JSON/text), request/run correlation, request-ID middleware
   tests/
 frontend/
-  app/page.tsx       # the whole UI — repository selection, task input, five tabs
-  lib/                # typed API client, SSE hook, TypeScript types mirroring the backend schemas
-  components/         # one component per panel (Timeline/Code/Diff/Tests/Report)
+  app/page.tsx        # shell — sidebar + Chat/Models views
+  app/globals.css     # design tokens (light/dark), focus rings, animations
+  lib/                # typed API client, SSE hook, pull-stream reader, theme hook, formatters
+  components/         # chat transcript + composer, session sidebar, usage/context popover,
+                      # run detail panels (Timeline/Code/Diff/Tests/Report),
+                      # models manager, model switcher, toasts, dialogs
 scripts/         # setup.sh, start.sh
 docker/          # sandbox.Dockerfile — the image SANDBOX_BACKEND=docker runs commands in
 data/            # local vector index, SQLite DB (gitignored)
@@ -790,8 +1202,43 @@ docs/
 
 ## Limitations (current milestone)
 
-- Only Ollama is implemented as an LLM/embedding provider; the interfaces
-  support others but none are built yet.
+- Only Ollama is implemented as an LLM/embedding provider or as a
+  `ModelManager`; the interfaces support others but none are built yet.
+- **Switching the embedding model doesn't re-index for you.** It clears the
+  now-incompatible vectors and tells you which repositories to re-index, but
+  running that is a manual step — code search returns nothing in between.
+- **The index goes stale as soon as the agent writes a file.** `apply_patch`
+  changes the repository but nothing re-indexes it, so the agent's own code
+  search cannot see its own work (or any file added since the last index run)
+  until the repository is re-indexed by hand. This is a real contributor to
+  bad runs: `search_code` silently returns whatever *is* indexed rather than
+  reporting that the file in question was never indexed at all.
+- **Loop prevention catches identical calls, not equivalent ones.** A model
+  that rephrases the same fruitless search slightly each time still gets a
+  fresh iteration; only exact repeats are skipped. It also compares the raw
+  input the model sent, before the tool's schema fills in defaults — so
+  `create_file(path="x")` and `create_file(path="x", content="")` are
+  functionally identical but not currently recognized as the same call,
+  since one omits a field the other states explicitly. Observed live: this
+  let two calls that should have been caught slip through as "new."
+- **A `finish` isn't checked against what actually happened.** The model's
+  own claim — "the fix works," "the file was renamed" — is trusted as
+  stated; nothing re-reads the repository to confirm it. Observed live: a
+  run reported a file had been "successfully renamed" when in fact the
+  original file was still present under its old name and the new path was
+  left empty. `verification_status` catches this for *tests* (a claim isn't
+  "verified" unless `run_tests` actually passed), but nothing analogous
+  exists for claims about file state.
+- **Session history is not summarized, just truncated.** Past the last few
+  turns, older context is dropped rather than condensed, so a long session
+  eventually forgets its own beginning.
+- **Schema changes are additive only.** `app/database/migrations.py` adds
+  missing columns and nothing else — dropping a column, changing a type, or
+  backfilling data still needs doing by hand.
+- **The model catalog is hand-maintained**, so newly published models won't
+  appear until the list is updated. They can still be installed with
+  `ollama pull` and will show up as installed, just without a description or
+  a context window in the UI.
 - **A cancelled/in-progress run's trackability doesn't survive a server
   restart** — `BackgroundAgentRunner` tracks `asyncio.Task`s in memory only.
   A restarted server can still show a run's persisted state via
@@ -887,3 +1334,4 @@ docs/
   list, so a repo-specific ignore rule (e.g. a custom build output dir) won't
   be respected until this is added.
 - Local model quality varies by hardware and chosen model size.
+# Open_Source_AI_Software_Engineer
