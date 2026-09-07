@@ -85,7 +85,13 @@ def walk_repository(root: Path, max_file_size_bytes: int) -> Iterator[CandidateF
             continue
         yield CandidateFile(
             absolute_path=path,
-            relative_path=str(path.relative_to(root)),
+            # as_posix(), not str(): on Windows str() yields 'app\main.py'.
+            # These paths are stored in the index, matched against what the
+            # agent passes to its file tools, and shown in search results, so
+            # a backslash here makes an index built on Windows disagree with
+            # one built anywhere else -- and with the model, which writes
+            # forward slashes regardless of host.
+            relative_path=path.relative_to(root).as_posix(),
             language=language,
             size_bytes=size,
         )

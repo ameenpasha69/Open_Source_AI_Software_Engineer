@@ -4,13 +4,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database.models import IndexedFile
+from app.execution.subprocess_runner import PYTHON_BINARY
 
 # Only Python gets an auto-detected default — it's the language this project
 # actually supports well (AST-based chunking, etc.); guessing a test/lint
 # command for every ecosystem risks being wrong more often than it's right.
 # Everything else must be configured explicitly via IndexRepositoryRequest.
 _PYTHON_DEFAULTS = {
-    "test_command": ["python3", "-m", "pytest"],
+    "test_command": [PYTHON_BINARY, "-m", "pytest"],
     "lint_command": ["ruff", "check", "."],
     "format_command": ["ruff", "format", "."],
 }

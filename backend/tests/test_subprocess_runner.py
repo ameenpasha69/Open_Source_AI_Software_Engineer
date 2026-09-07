@@ -3,6 +3,7 @@ import shutil
 import pytest
 from app.execution.subprocess_runner import (
     ALLOWED_COMMANDS,
+    PYTHON_BINARY,
     CommandNotAllowedError,
     SandboxUnavailableError,
     build_sandbox_env,
@@ -16,7 +17,7 @@ requires_docker = pytest.mark.skipif(not _DOCKER_AVAILABLE, reason="Docker is no
 
 
 def test_check_command_allowed_accepts_allowlisted_binary():
-    check_command_allowed(["python3", "-c", "pass"])  # must not raise
+    check_command_allowed([PYTHON_BINARY, "-c", "pass"])  # must not raise
 
 
 def test_check_command_allowed_rejects_disallowed_binary():
@@ -61,7 +62,7 @@ async def test_run_command_without_allowlist_flag_permits_any_binary(tmp_path):
 async def test_run_command_does_not_leak_host_secret_into_subprocess(tmp_path, monkeypatch):
     monkeypatch.setenv("SOME_SECRET_API_KEY", "sk-super-secret")
     result = await run_command(
-        ["python3", "-c", "import os; print(os.environ.get('SOME_SECRET_API_KEY', 'NOT_SET'))"],
+        [PYTHON_BINARY, "-c", "import os; print(os.environ.get('SOME_SECRET_API_KEY', 'NOT_SET'))"],
         cwd=tmp_path,
         timeout_seconds=10.0,
     )
@@ -82,7 +83,7 @@ async def test_run_command_docker_backend_raises_when_docker_binary_missing(tmp_
 @requires_docker
 async def test_run_command_docker_backend_runs_the_command_in_a_container(tmp_path):
     result = await run_command(
-        ["python3", "-c", "print('hello from container')"],
+        [PYTHON_BINARY, "-c", "print('hello from container')"],
         cwd=tmp_path,
         timeout_seconds=30.0,
         sandbox_backend="docker",
@@ -98,7 +99,7 @@ async def test_run_command_docker_backend_can_see_and_modify_the_mounted_directo
     (tmp_path / "input.txt").write_text("42")
 
     result = await run_command(
-        ["python3", "-c", "open('output.txt', 'w').write(open('input.txt').read() + '!')"],
+        [PYTHON_BINARY, "-c", "open('output.txt', 'w').write(open('input.txt').read() + '!')"],
         cwd=tmp_path,
         timeout_seconds=30.0,
         sandbox_backend="docker",
@@ -112,7 +113,7 @@ async def test_run_command_docker_backend_can_see_and_modify_the_mounted_directo
 @requires_docker
 async def test_run_command_docker_backend_blocks_network_access(tmp_path):
     result = await run_command(
-        ["python3", "-c", "import socket; socket.create_connection(('8.8.8.8', 53), timeout=2)"],
+        [PYTHON_BINARY, "-c", "import socket; socket.create_connection(('8.8.8.8', 53), timeout=2)"],
         cwd=tmp_path,
         timeout_seconds=30.0,
         sandbox_backend="docker",
@@ -138,7 +139,7 @@ async def test_run_command_docker_backend_raises_for_a_nonexistent_image(tmp_pat
 @requires_docker
 async def test_run_command_docker_backend_kills_container_on_timeout(tmp_path):
     result = await run_command(
-        ["python3", "-c", "import time; time.sleep(30)"],
+        [PYTHON_BINARY, "-c", "import time; time.sleep(30)"],
         cwd=tmp_path,
         timeout_seconds=1.0,
         sandbox_backend="docker",

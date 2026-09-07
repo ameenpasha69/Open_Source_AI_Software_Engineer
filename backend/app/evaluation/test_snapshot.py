@@ -2,7 +2,7 @@ import re
 from pathlib import Path
 
 from app.evaluation.models import TestSnapshot
-from app.execution.subprocess_runner import run_command
+from app.execution.subprocess_runner import PYTHON_BINARY, run_command
 
 _VERBOSE_RESULT_LINE = re.compile(r"^(\S+::\S+)\s+(PASSED|FAILED|ERROR)\b")
 
@@ -17,7 +17,7 @@ async def take_test_snapshot(repo_path: Path) -> TestSnapshot:
     whatever the agent's own run_tests calls did or didn't do.
     """
     result = await run_command(
-        ["python3", "-m", "pytest", "-v"], cwd=repo_path, timeout_seconds=_SNAPSHOT_TIMEOUT_SECONDS
+        [PYTHON_BINARY, "-m", "pytest", "-v"], cwd=repo_path, timeout_seconds=_SNAPSHOT_TIMEOUT_SECONDS
     )
     passed, failed = [], []
     for line in result.stdout.splitlines():

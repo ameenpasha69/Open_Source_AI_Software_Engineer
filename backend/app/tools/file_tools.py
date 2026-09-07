@@ -51,7 +51,8 @@ class ListFilesTool(Tool):
                 continue
             entries.append(
                 FileEntry(
-                    path=str(item.relative_to(repo_root)),
+                    # Forward slashes on every host -- see file_walker.
+                    path=item.relative_to(repo_root).as_posix(),
                     is_dir=item.is_dir(),
                     size_bytes=None if item.is_dir() else item.stat().st_size,
                 )

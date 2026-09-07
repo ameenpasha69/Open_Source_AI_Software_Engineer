@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from app.llm.factory import get_llm_provider
+from app.execution.subprocess_runner import PYTHON_BINARY
 from app.main import app
 from httpx import AsyncClient
 from sqlalchemy import select
@@ -307,7 +308,7 @@ async def test_get_agent_run_tests_returns_structured_results(client, tmp_path):
     assert len(body) == 1
     assert body[0]["passed"] is True
     assert body[0]["scope"] == "full"
-    assert body[0]["command"] == "python3 -m pytest"
+    assert body[0]["command"] == f"{PYTHON_BINARY} -m pytest"
 
 
 async def test_get_agent_run_tests_for_unknown_run_returns_404(client):

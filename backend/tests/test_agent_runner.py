@@ -2,6 +2,7 @@ import json
 
 import pytest
 from app.agents.runner import AgentRunner
+from app.execution.subprocess_runner import PYTHON_BINARY
 from app.agents.state import AgentStatus
 from app.database.models import (
     AgentEvent,
@@ -280,7 +281,7 @@ def calc_repository_id(db_session, calc_repo):
     )
     result = indexer.index(calc_repo)
     repository = db_session.get(Repository, result.repository_id)
-    repository.test_command_json = json.dumps(["python3", "-m", "pytest"])
+    repository.test_command_json = json.dumps([PYTHON_BINARY, "-m", "pytest"])
     db_session.commit()
     return result.repository_id
 

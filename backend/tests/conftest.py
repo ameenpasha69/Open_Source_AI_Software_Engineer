@@ -1,4 +1,5 @@
 import hashlib
+from pathlib import Path
 
 import pytest
 from app.agents.background import get_background_agent_runner
@@ -175,3 +176,21 @@ async def wait_for_agent_run(run_id: str) -> None:
     task = get_background_agent_runner().get_task(run_id)
     if task is not None:
         await task
+
+
+@pytest.fixture
+def symlink_or_skip():
+    """Create a symlink, or skip the test if this OS will not allow it.
+
+    Windows requires Developer Mode or elevation to create a symlink; without
+    either, the call raises OSError(WinError 1314). That says nothing about the
+    behaviour under test, so it is a skip rather than a failure.
+    """
+
+    def _symlink(link: Path, target: Path) -> None:
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlinks not permitted on this platform: {exc}")
+
+    return _symlink

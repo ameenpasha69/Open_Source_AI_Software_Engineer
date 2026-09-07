@@ -128,7 +128,7 @@ async def test_get_file_context_clamps_at_start_of_file(db_session, nested_repos
     assert result.start_line == 1
 
 
-async def test_list_files_works_when_repository_path_is_a_symlink(db_session, tmp_path):
+async def test_list_files_works_when_repository_path_is_a_symlink(db_session, tmp_path, symlink_or_skip):
     """Same regression as apply_patch: an unresolved repository.path whose
     resolved form differs must not crash list_files's ignored-directory check."""
     real_dir = tmp_path / "real_repo"
@@ -136,7 +136,7 @@ async def test_list_files_works_when_repository_path_is_a_symlink(db_session, tm
     (real_dir / "a.py").write_text("x = 1\n")
 
     symlink_path = tmp_path / "repo_via_symlink"
-    symlink_path.symlink_to(real_dir)
+    symlink_or_skip(symlink_path, real_dir)
     assert symlink_path.resolve() != symlink_path
 
     repository = Repository(name="symlinked_repo", path=str(symlink_path))

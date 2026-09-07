@@ -1,3 +1,4 @@
+from app.execution.subprocess_runner import PYTHON_BINARY
 from httpx import AsyncClient
 
 
@@ -52,7 +53,7 @@ async def test_index_auto_detects_python_test_command(client, sample_repo):
         get_resp = await http.get(f"/api/repositories/{repository_id}")
 
     body = get_resp.json()
-    assert body["test_command"] == ["python3", "-m", "pytest"]
+    assert body["test_command"] == [PYTHON_BINARY, "-m", "pytest"]
     assert body["lint_command"] == ["ruff", "check", "."]
     assert body["format_command"] == ["ruff", "format", "."]
 
