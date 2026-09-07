@@ -19,10 +19,17 @@ class Settings(BaseSettings):
     # one-object-per-line structured logs suitable for a log aggregator.
     log_format: str = "text"
     data_dir: Path = Path("./data")
-    # The Next.js dev server's origin — the only one allowed to call this API
-    # cross-origin. Everything here runs on localhost; this isn't a
-    # public-internet CORS policy, just what a browser-based frontend needs.
+    # The frontend origin(s) allowed to call this API cross-origin, comma
+    # separated. A list rather than one value so the same backend serves both
+    # http://localhost:3000 and the LAN address a phone or laptop uses --
+    # otherwise reaching it from another device means breaking it on this one.
+    # Still not a public-internet CORS policy; just the origins a browser
+    # actually loads the UI from.
     frontend_origin: str = "http://localhost:3000"
+
+    @property
+    def frontend_origins(self) -> list[str]:
+        return [o.strip() for o in self.frontend_origin.split(",") if o.strip()]
 
     llm_provider: str = "ollama"
     llm_model: str = "qwen2.5-coder:7b"

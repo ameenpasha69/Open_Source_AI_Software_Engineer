@@ -1,3 +1,4 @@
+from app.config.settings import Settings
 from app.config.settings import get_settings
 from app.llm.factory import get_llm_provider
 from app.main import app
@@ -33,3 +34,30 @@ async def test_health_endpoint_reports_degraded_when_llm_unreachable():
 
     assert resp.status_code == 200
     assert resp.json()["status"] == "degraded"
+
+
+def test_frontend_origins_splits_comma_separated_list():
+    """Both localhost and the LAN address have to be allowed at once.
+
+    Reaching the UI from a phone means the browser sends the LAN origin;
+    keeping localhost working means the desktop's origin must survive too.
+    A single-origin setting forces a choice between them.
+    """
+    settings = Settings(frontend_origin="http://localhost:3000,http://192.168.0.6:3000")
+    assert settings.frontend_origins == [
+        "http://localhost:3000",
+        "http://192.168.0.6:3000",
+    ]
+
+
+def test_frontend_origins_tolerates_spacing_and_trailing_commas():
+    settings = Settings(frontend_origin=" http://a:3000 , http://b:3000 ,")
+    assert settings.frontend_origins == ["http://a:3000", "http://b:3000"]
+
+
+def test_frontend_origins_single_value_is_unchanged():
+    # Passed explicitly rather than relying on the class default: Settings
+    # reads .env, so the default here is whatever this machine is configured
+    # with, not the value in the source.
+    settings = Settings(frontend_origin="http://localhost:3000")
+    assert settings.frontend_origins == ["http://localhost:3000"]
