@@ -231,7 +231,7 @@ async def test_apply_patch_diff_uses_git_style_headers(db_session, patchable_rep
     assert "+++ b/service.py" in result.diff
 
 
-async def test_apply_patch_works_when_repository_path_is_a_symlink(db_session, tmp_path):
+async def test_apply_patch_works_when_repository_path_is_a_symlink(db_session, tmp_path, symlink_or_skip):
     """Regression test: repository.path stored as an unresolved path whose
     resolved form differs (e.g. a symlink) must not crash — this bit us for
     real via macOS's /tmp -> /private/tmp, found through live end-to-end
@@ -241,7 +241,7 @@ async def test_apply_patch_works_when_repository_path_is_a_symlink(db_session, t
     (real_dir / "service.py").write_text("def f():\n    return 1\n")
 
     symlink_path = tmp_path / "repo_via_symlink"
-    symlink_path.symlink_to(real_dir)
+    symlink_or_skip(symlink_path, real_dir)
     assert symlink_path.resolve() != symlink_path  # the scenario actually applies
 
     repository = Repository(name="symlinked_repo", path=str(symlink_path))
@@ -342,11 +342,11 @@ async def test_create_file_refuses_an_ignored_directory(db_session, patchable_re
         )
 
 
-async def test_create_file_works_when_repository_path_is_a_symlink(db_session, tmp_path):
+async def test_create_file_works_when_repository_path_is_a_symlink(db_session, tmp_path, symlink_or_skip):
     real_dir = tmp_path / "real_repo"
     real_dir.mkdir()
     symlink_path = tmp_path / "repo_via_symlink"
-    symlink_path.symlink_to(real_dir)
+    symlink_or_skip(symlink_path, real_dir)
 
     repository = Repository(name="symlinked_repo", path=str(symlink_path))
     db_session.add(repository)

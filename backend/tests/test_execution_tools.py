@@ -3,6 +3,7 @@ import shutil
 
 import pytest
 from app.database.models import Repository
+from app.execution.subprocess_runner import PYTHON_BINARY
 from app.execution.subprocess_runner import SandboxSettings
 from app.tools.base import ToolError
 from app.tools.execution_tools import (
@@ -35,9 +36,9 @@ def repository_with_test_command(db_session, test_repo):
     repository = Repository(
         name="test_repo",
         path=str(test_repo),
-        test_command_json=json.dumps(["python3", "-m", "pytest"]),
-        lint_command_json=json.dumps(["python3", "-c", "print('lint ok')"]),
-        format_command_json=json.dumps(["python3", "-c", "print('format ok')"]),
+        test_command_json=json.dumps([PYTHON_BINARY, "-m", "pytest"]),
+        lint_command_json=json.dumps([PYTHON_BINARY, "-c", "print('lint ok')"]),
+        format_command_json=json.dumps([PYTHON_BINARY, "-c", "print('format ok')"]),
     )
     db_session.add(repository)
     db_session.flush()
@@ -102,7 +103,7 @@ async def test_run_command_rejects_disallowed_binary(db_session, repository_with
 async def test_run_command_runs_allowed_binary(db_session, repository_with_test_command):
     tool = RunCommandTool(db_session)
     result = await tool.run(
-        RunCommandInput(repository_id=repository_with_test_command.id, command=["python3", "-c", "print('hi')"])
+        RunCommandInput(repository_id=repository_with_test_command.id, command=[PYTHON_BINARY, "-c", "print('hi')"])
     )
     assert result.passed is True
     assert "hi" in result.stdout
@@ -150,7 +151,7 @@ async def test_run_command_via_docker_sandbox_cannot_reach_the_network(db_sessio
     result = await tool.run(
         RunCommandInput(
             repository_id=repository_with_test_command.id,
-            command=["python3", "-c", "import socket; socket.create_connection(('8.8.8.8', 53), timeout=2)"],
+            command=[PYTHON_BINARY, "-c", "import socket; socket.create_connection(('8.8.8.8', 53), timeout=2)"],
         )
     )
 

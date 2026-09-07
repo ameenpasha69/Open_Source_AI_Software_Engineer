@@ -1,5 +1,6 @@
 import pytest
 from app.retrieval.command_detection import detect_default_commands
+from app.execution.subprocess_runner import PYTHON_BINARY
 from app.retrieval.indexer import RepositoryIndexer
 
 
@@ -32,7 +33,7 @@ def test_detects_python_defaults_for_python_majority_repo(db_session, python_rep
     result = _index(db_session, python_repo)
     defaults = detect_default_commands(db_session, result.repository_id)
 
-    assert defaults["test_command"] == ["python3", "-m", "pytest"]
+    assert defaults["test_command"] == [PYTHON_BINARY, "-m", "pytest"]
     assert defaults["lint_command"] == ["ruff", "check", "."]
     assert defaults["format_command"] == ["ruff", "format", "."]
 

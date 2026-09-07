@@ -25,10 +25,46 @@ _ENV_PASSTHROUGH_KEYS = (
     "PYTHONPATH",
 )
 
+# The list above is POSIX-shaped, and on Windows it is not merely incomplete --
+# it is not enough to start CPython at all. Without SYSTEMROOT, Winsock cannot
+# initialise, so `import asyncio` raises
+#
+#     OSError: [WinError 10106] The requested service provider could not be
+#     loaded or initialized
+#
+# during interpreter startup. Every sandboxed command then dies before running,
+# and because the traceback goes to stderr with an empty stdout, it surfaces as
+# a test run that found no tests rather than as a broken environment.
+# Confirmed by bisection: SYSTEMROOT alone is what fixes it.
+#
+# The rest are the Windows equivalents of what the POSIX list already allows --
+# PATHEXT is how a bare "python" resolves to python.exe, USERPROFILE is HOME,
+# and node/npm read APPDATA the way they read HOME elsewhere. All are OS
+# plumbing or path roots, not credentials; the secret-isolation property the
+# allowlist exists for is unchanged.
+_WINDOWS_ENV_PASSTHROUGH_KEYS = (
+    "SYSTEMROOT",
+    "WINDIR",
+    "PATHEXT",
+    "COMSPEC",
+    "TEMP",
+    "TMP",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "NUMBER_OF_PROCESSORS",
+)
+
 # Binaries the sandbox will execute at all. Not a guarantee those binaries
 # are themselves safe to run unsupervised — it's a floor, not a ceiling:
 # anything not in this list (rm, sudo, curl, dd, mkfs, ...) is refused
 # outright, regardless of arguments. Extend deliberately, not reflexively.
+# "python3" is not a real binary on Windows. The name resolves to a Microsoft
+# Store stub that prints an install hint and exits 9009, so every command built
+# around it fails in a way that looks like a broken test command rather than a
+# missing interpreter. Pick the name the host actually has.
+PYTHON_BINARY = "python" if os.name == "nt" else "python3"
+
 ALLOWED_COMMANDS = frozenset(
     {
         "python",
@@ -102,7 +138,10 @@ class CommandResult:
 
 
 def build_sandbox_env() -> dict[str, str]:
-    env = {key: os.environ[key] for key in _ENV_PASSTHROUGH_KEYS if key in os.environ}
+    keys = _ENV_PASSTHROUGH_KEYS
+    if os.name == "nt":
+        keys += _WINDOWS_ENV_PASSTHROUGH_KEYS
+    env = {key: os.environ[key] for key in keys if key in os.environ}
     # CPython's default .pyc cache invalidation compares source mtime at
     # *second* granularity. The agent can plausibly patch a file and re-run
     # tests within the same wall-clock second — without this, that re-run
