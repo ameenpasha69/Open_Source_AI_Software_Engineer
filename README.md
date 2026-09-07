@@ -1,3 +1,14 @@
+> **Attribution.** This repository is a copy of
+> [habeebsait/Open_Source_AI_Software_Engineer](https://github.com/habeebsait/Open_Source_AI_Software_Engineer),
+> written by MD Habeeb Sait. It is republished here by
+> [@ameenpasha69](https://github.com/ameenpasha69), who is **not** the author.
+> Every original commit and its authorship is preserved in this repository's
+> git history.
+>
+> The upstream project publishes no LICENSE file, so under default copyright
+> the author retains all rights. Ask the author before using, modifying, or
+> redistributing this code.
+
 # Local AI Software Engineer
 
 A local, autonomous AI software engineering agent. Given a Git repository and a
