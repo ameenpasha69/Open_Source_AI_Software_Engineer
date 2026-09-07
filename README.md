@@ -1,13 +1,23 @@
-> **Attribution.** This repository is a copy of
-> [habeebsait/Open_Source_AI_Software_Engineer](https://github.com/habeebsait/Open_Source_AI_Software_Engineer),
-> written by MD Habeeb Sait. It is republished here by
-> [@ameenpasha69](https://github.com/ameenpasha69), who is **not** the author.
-> Every original commit and its authorship is preserved in this repository's
-> git history.
+> **About this copy.** The original project is
+> [habeebsait/Open_Source_AI_Software_Engineer](https://github.com/habeebsait/Open_Source_AI_Software_Engineer)
+> by **MD Habeeb Sait**, used here with his permission. This copy is
+> maintained by [@ameenpasha69](https://github.com/ameenpasha69); the
+> original authorship is preserved in the git history.
 >
-> The upstream project publishes no LICENSE file, so under default copyright
-> the author retains all rights. Ask the author before using, modifying, or
-> redistributing this code.
+> **What is different here** — see [NOTICE.md](NOTICE.md) for detail:
+>
+> - **Fixed a crash that made large repositories impossible to index.** Every
+>   chunk went to Ollama's `/api/embed` in one request; past roughly 400
+>   chunks that kills the model runner on a consumer GPU, and it surfaced as
+>   a bare HTTP 400 rather than as the crash it was. Embedding is now batched.
+> - **CORS accepts more than one frontend origin**, so the API can serve the
+>   UI from more than one address without being reconfigured.
+> - Verified on Windows, where 23 of the test suite's assertions hardcode
+>   POSIX path separators and fail for that reason alone.
+>
+> Upstream publishes no LICENSE file. Permission here was given to
+> @ameenpasha69 directly; anyone else wanting to use this code should ask
+> MD Habeeb Sait.
 
 # Local AI Software Engineer
 
