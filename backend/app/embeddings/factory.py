@@ -24,6 +24,7 @@ def build_embedding_provider(settings: Settings, model: str | None = None) -> Em
         base_url=settings.embedding_base_url,
         model=model or settings.embedding_model,
         timeout_seconds=settings.llm_request_timeout_seconds,
+        batch_size=settings.embedding_batch_size,
     )
 
 

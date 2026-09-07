@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     embedding_provider: str = "ollama"
     embedding_model: str = "nomic-embed-text"
     embedding_base_url: str = "http://localhost:11434"
+    # Texts per /api/embed request. Bounded because a large batch can kill
+    # the Ollama model runner on a small GPU -- see OllamaEmbeddingProvider.
+    embedding_batch_size: int = 64
 
     max_agent_iterations: int = 8
 

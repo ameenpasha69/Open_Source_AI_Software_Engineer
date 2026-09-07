@@ -87,3 +87,43 @@ async def test_ollama_embedding_provider_health_check_false_when_unreachable():
         base_url="http://localhost:1", model="nomic-embed-text", timeout_seconds=0.5
     )
     assert await provider.health_check() is False
+
+
+async def test_ollama_embedding_provider_splits_large_input_into_batches(monkeypatch):
+    """A corpus larger than the batch size goes out as several requests.
+
+    Handing Ollama the whole corpus in one call kills the model runner on a
+    small GPU, and the resulting HTTP 400 looks like a malformed request
+    rather than a crashed subprocess. Batching is what keeps the peak bounded,
+    so it is worth asserting rather than trusting.
+    """
+    provider = OllamaEmbeddingProvider(
+        base_url="http://localhost:11434", model="nomic-embed-text",
+        timeout_seconds=1.0, batch_size=2,
+    )
+    seen: list[list[str]] = []
+
+    async def fake_post(self, url, json):
+        seen.append(json["input"])
+        return httpx.Response(
+            200,
+            json={"embeddings": [[float(len(t))] for t in json["input"]]},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", fake_post)
+
+    vectors = await provider.embed_documents(["a", "bb", "ccc", "dddd", "eeeee"])
+
+    assert seen == [["a", "bb"], ["ccc", "dddd"], ["eeeee"]]
+    # One vector per input, in the original order, across the batch boundaries.
+    assert vectors == [[1.0], [2.0], [3.0], [4.0], [5.0]]
+
+
+async def test_ollama_embedding_provider_batch_size_floor_is_one():
+    """A zero or negative batch size would loop forever rather than fail."""
+    provider = OllamaEmbeddingProvider(
+        base_url="http://localhost:11434", model="nomic-embed-text",
+        timeout_seconds=1.0, batch_size=0,
+    )
+    assert provider._batch_size == 1
