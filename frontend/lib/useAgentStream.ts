@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { API_BASE_URL } from "./api";
+import { API_BASE_URL, withToken } from "./api";
 import type { AgentEventOut, AgentStatus } from "./types";
 
 interface AgentStreamState {
@@ -32,7 +32,9 @@ export function useAgentStream(runId: string | null): AgentStreamState {
     setFinalStatus(null);
     if (!runId) return;
 
-    const source = new EventSource(`${API_BASE_URL}/api/agent/${runId}/stream`);
+    const source = new EventSource(
+      withToken(`${API_BASE_URL}/api/agent/${runId}/stream`),
+    );
     sourceRef.current = source;
 
     source.onmessage = (message) => {

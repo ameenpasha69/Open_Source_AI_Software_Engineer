@@ -18,6 +18,23 @@ import type {
 
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
 
+/** The API's token. The backend generates one on first start and logs it; put
+ * it in NEXT_PUBLIC_API_AUTH_TOKEN. Empty means the backend is running with
+ * AUTH_ENABLED=false, in which case no header is sent and nothing changes. */
+export const API_AUTH_TOKEN = process.env.NEXT_PUBLIC_API_AUTH_TOKEN ?? "";
+
+export function authHeaders(): Record<string, string> {
+  return API_AUTH_TOKEN ? { Authorization: `Bearer ${API_AUTH_TOKEN}` } : {};
+}
+
+/** EventSource cannot set headers, so the stream carries the token in the URL
+ * instead. Only for that case -- everything else uses the header. */
+export function withToken(url: string): string {
+  if (!API_AUTH_TOKEN) return url;
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}token=${encodeURIComponent(API_AUTH_TOKEN)}`;
+}
+
 class ApiError extends Error {
   constructor(
     public status: number,
@@ -31,7 +48,7 @@ class ApiError extends Error {
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE_URL}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...init?.headers },
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({ detail: res.statusText }));
@@ -77,7 +94,10 @@ export const api = {
     }),
 
   deleteSession: async (sessionId: string): Promise<void> => {
-    const res = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`, { method: "DELETE" });
+    const res = await fetch(`${API_BASE_URL}/api/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: authHeaders(),
+    });
     if (!res.ok) throw new ApiError(res.status, `Could not delete session ${sessionId}`);
   },
 
@@ -124,7 +144,7 @@ export const api = {
   ): Promise<void> => {
     const res = await fetch(`${API_BASE_URL}/api/models/pull`, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...authHeaders() },
       body: JSON.stringify({ name }),
       signal,
     });

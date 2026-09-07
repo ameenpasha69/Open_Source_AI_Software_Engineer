@@ -27,6 +27,14 @@ class Settings(BaseSettings):
     # actually loads the UI from.
     frontend_origin: str = "http://localhost:3000"
 
+    # This API runs commands and writes files, so it is authenticated by
+    # default. Leave api_auth_token unset and one is generated on first start
+    # and kept in the data directory; set it explicitly to pin a known value.
+    # auth_enabled exists for the case where something in front of the app is
+    # already doing the authenticating -- turning it off has to be deliberate.
+    auth_enabled: bool = True
+    api_auth_token: str | None = None
+
     @property
     def frontend_origins(self) -> list[str]:
         return [o.strip() for o in self.frontend_origin.split(",") if o.strip()]

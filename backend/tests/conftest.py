@@ -122,7 +122,12 @@ def client(tmp_path, fake_embedding_provider):
     live Ollama server or real project data touched by tests."""
     engine = create_sqlite_engine(f"sqlite:///{tmp_path / 'test.db'}")
     session_factory = get_session_factory(engine)
-    test_settings = Settings(_env_file=None, data_dir=tmp_path / "data")
+    # Auth off for the general fixture: these tests are about indexing, tools
+    # and the agent, not about the token, and threading a header through every
+    # one of them would obscure what each is actually asserting. Authentication
+    # itself is covered directly in test_auth.py, which builds its own client
+    # with auth on -- including the check that a tokenless request is refused.
+    test_settings = Settings(_env_file=None, data_dir=tmp_path / "data", auth_enabled=False)
 
     def override_get_db_session():
         session = session_factory()

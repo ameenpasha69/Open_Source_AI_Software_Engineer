@@ -7,6 +7,11 @@ from httpx import ASGITransport, AsyncClient
 
 async def test_health_endpoint_reports_ok_when_llm_reachable(fake_llm_provider):
     app.dependency_overrides[get_llm_provider] = lambda: fake_llm_provider
+    # This test builds its own transport rather than using the client
+    # fixture, so it has to opt out of auth the same way the fixture does.
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, auth_enabled=False
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
@@ -25,6 +30,9 @@ async def test_health_endpoint_reports_degraded_when_llm_unreachable():
     from tests.conftest import FakeLLMProvider
 
     app.dependency_overrides[get_llm_provider] = lambda: FakeLLMProvider(reachable=False)
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None, auth_enabled=False
+    )
 
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
