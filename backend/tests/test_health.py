@@ -1,5 +1,4 @@
-from app.config.settings import Settings
-from app.config.settings import get_settings
+from app.config.settings import Settings, get_settings
 from app.llm.factory import get_llm_provider
 from app.main import app
 from httpx import ASGITransport, AsyncClient

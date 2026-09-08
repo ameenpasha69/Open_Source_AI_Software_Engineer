@@ -3,8 +3,7 @@ import shutil
 
 import pytest
 from app.database.models import Repository
-from app.execution.subprocess_runner import PYTHON_BINARY
-from app.execution.subprocess_runner import SandboxSettings
+from app.execution.subprocess_runner import PYTHON_BINARY, SandboxSettings
 from app.tools.base import ToolError
 from app.tools.execution_tools import (
     RunCommandInput,

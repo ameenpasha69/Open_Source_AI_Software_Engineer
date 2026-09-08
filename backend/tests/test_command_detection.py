@@ -1,6 +1,6 @@
 import pytest
-from app.retrieval.command_detection import detect_default_commands
 from app.execution.subprocess_runner import PYTHON_BINARY
+from app.retrieval.command_detection import detect_default_commands
 from app.retrieval.indexer import RepositoryIndexer
 
 

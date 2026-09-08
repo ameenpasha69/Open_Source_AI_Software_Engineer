@@ -8,10 +8,10 @@ from sqlalchemy.orm import Session
 from app.agents.runner import AgentRunner
 from app.config.settings import Settings
 from app.database.models import Repository
-from app.execution.subprocess_runner import PYTHON_BINARY
 from app.embeddings.base import EmbeddingProvider
 from app.evaluation.models import TaskDefinition, TaskResult, TestSnapshot
 from app.evaluation.test_snapshot import take_test_snapshot
+from app.execution.subprocess_runner import PYTHON_BINARY
 from app.llm.base import LLMProvider
 from app.retrieval.embedding_pipeline import EmbeddingPipeline
 from app.retrieval.indexer import RepositoryIndexer

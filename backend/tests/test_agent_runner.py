@@ -2,7 +2,6 @@ import json
 
 import pytest
 from app.agents.runner import AgentRunner
-from app.execution.subprocess_runner import PYTHON_BINARY
 from app.agents.state import AgentStatus
 from app.database.models import (
     AgentEvent,
@@ -12,6 +11,7 @@ from app.database.models import (
     Repository,
     TestRun,
 )
+from app.execution.subprocess_runner import PYTHON_BINARY
 from app.llm.exceptions import LLMConnectionError
 from app.retrieval.indexer import RepositoryIndexer, RepositoryNotFoundError
 from app.tools.base import ToolRegistry

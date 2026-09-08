@@ -6,7 +6,6 @@ from pathlib import Path
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.auth import require_token, resolve_auth_token
 from app.api.routes.agent import router as agent_router
 from app.api.routes.health import router as health_router
 from app.api.routes.models import router as models_router
@@ -14,6 +13,7 @@ from app.api.routes.repositories import router as repositories_router
 from app.api.routes.search import router as search_router
 from app.api.routes.sessions import router as sessions_router
 from app.api.routes.tools import router as tools_router
+from app.auth import require_token, resolve_auth_token
 from app.config.settings import get_settings
 from app.database.session import get_engine
 from app.observability.logging import configure_logging
