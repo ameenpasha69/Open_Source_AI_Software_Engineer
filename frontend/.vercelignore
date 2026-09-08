@@ -1,0 +1,5 @@
+# Never ship local secrets to a public build. NEXT_PUBLIC_* values are compiled
+# into the browser bundle, so a token here would be readable by anyone who
+# loads the page.
+.env
+.env.*

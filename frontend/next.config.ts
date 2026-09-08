@@ -1,10 +1,13 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  // Emits .next/standalone: a self-contained server with only the modules it
-  // actually imports, so the production image carries that instead of the whole
-  // node_modules tree. Additive -- `next dev` and `next start` are unaffected.
-  output: "standalone",
+  // "standalone" emits a server with only the modules it imports, which is what
+  // the Docker image copies instead of the whole node_modules tree.
+  //
+  // Not on Vercel, though: Vercel builds its own output and tracing the
+  // standalone server on top of that fails the build on .next/*.nft.json. It
+  // sets VERCEL=1, so the mode is chosen from that rather than being pinned.
+  output: process.env.VERCEL ? undefined : "standalone",
 };
 
 export default nextConfig;
