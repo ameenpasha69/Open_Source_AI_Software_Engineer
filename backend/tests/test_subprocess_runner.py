@@ -147,3 +147,40 @@ async def test_run_command_docker_backend_kills_container_on_timeout(tmp_path):
     )
 
     assert result.timed_out is True
+
+
+@requires_docker
+async def test_memory_limit_is_a_hard_ceiling(tmp_path):
+    """The configured memory limit must not be silently doubled by swap.
+
+    Docker defaults --memory-swap to twice --memory when it is not set, so a
+    "512m" container could hold 512m of RAM plus 512m of swap. A 900 MB
+    allocation used to succeed under a 512m limit; it must now be OOM-killed
+    (exit 137) instead.
+    """
+    result = await run_command(
+        [PYTHON_BINARY, "-c", "x = bytearray(900 * 1024 * 1024)"],
+        cwd=tmp_path,
+        timeout_seconds=120,
+        sandbox_backend="docker",
+        docker_image=_SANDBOX_IMAGE,
+        docker_memory_limit="512m",
+    )
+
+    assert result.exit_code == 137, "allocation above the limit should be OOM-killed"
+
+
+@requires_docker
+async def test_allocation_under_the_memory_limit_still_runs(tmp_path):
+    """The ceiling must not be so tight that ordinary work is killed."""
+    result = await run_command(
+        [PYTHON_BINARY, "-c", "x = bytearray(200 * 1024 * 1024); print('ok')"],
+        cwd=tmp_path,
+        timeout_seconds=120,
+        sandbox_backend="docker",
+        docker_image=_SANDBOX_IMAGE,
+        docker_memory_limit="512m",
+    )
+
+    assert result.exit_code == 0
+    assert "ok" in result.stdout

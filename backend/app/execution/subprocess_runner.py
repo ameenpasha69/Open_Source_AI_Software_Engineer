@@ -293,6 +293,13 @@ async def _run_docker(
         "--network",
         "none",
         f"--memory={memory_limit}",
+        # Without --memory-swap, Docker defaults it to twice --memory, so a
+        # "512m" container can actually hold 512m of RAM plus 512m of swap.
+        # Verified before this line existed: a 900 MB allocation succeeded
+        # under a 512m limit. Setting the two equal disables swap and makes
+        # the configured number the real ceiling -- a runaway process gets
+        # OOM-killed rather than quietly using double what was asked for.
+        f"--memory-swap={memory_limit}",
         f"--cpus={cpu_limit}",
         "-e",
         "PYTHONDONTWRITEBYTECODE=1",
