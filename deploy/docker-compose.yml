@@ -1,0 +1,109 @@
+# Full stack: Ollama, the API, and the web UI.
+#
+#   cd deploy
+#   cp .env.example .env      # then set API_AUTH_TOKEN
+#   docker compose up -d --build
+#   docker compose exec ollama ollama pull qwen2.5-coder:7b
+#   docker compose exec ollama ollama pull nomic-embed-text
+#
+# The models are ~5 GB and are pulled once into a named volume, not baked into
+# an image -- an image carrying them would be enormous and would have to be
+# rebuilt to change model.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    volumes:
+      - ollama-models:/root/.ollama
+    # Deliberately not published to the host. Only the backend needs to reach
+    # it, and Ollama has no authentication of its own -- an exposed port here
+    # would be an open inference endpoint next to an authenticated API.
+    expose:
+      - "11434"
+    restart: unless-stopped
+    healthcheck:
+      # Ollama's image has no curl; its own CLI is the dependable probe.
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+    # On a GPU host, uncomment to hand the card to Ollama. Without it the
+    # models run on CPU, which works but is minutes per request rather than
+    # seconds. Needs the NVIDIA Container Toolkit on the host.
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+
+  backend:
+    build:
+      context: ..
+      dockerfile: deploy/backend.Dockerfile
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      LLM_BASE_URL: http://ollama:11434
+      EMBEDDING_BASE_URL: http://ollama:11434
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5-coder:7b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+      DATA_DIR: /app/data
+      # Unset and the backend generates a token on first start and logs it --
+      # fine locally, awkward here, because the frontend image has to be built
+      # with the same value. Set it in .env so both sides agree.
+      API_AUTH_TOKEN: ${API_AUTH_TOKEN:?set API_AUTH_TOKEN in deploy/.env}
+      AUTH_ENABLED: "true"
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
+      SANDBOX_BACKEND: ${SANDBOX_BACKEND:-docker}
+      SANDBOX_DOCKER_IMAGE: local-ai-softeng-sandbox:latest
+      SANDBOX_DOCKER_MEMORY_LIMIT: ${SANDBOX_DOCKER_MEMORY_LIMIT:-512m}
+      SANDBOX_DOCKER_CPU_LIMIT: ${SANDBOX_DOCKER_CPU_LIMIT:-1.0}
+      LLM_REQUEST_TIMEOUT_SECONDS: ${LLM_REQUEST_TIMEOUT_SECONDS:-1800}
+    volumes:
+      - backend-data:/app/data
+      # Repositories the agent may work on -- and, since it sees nothing else,
+      # the boundary of what it can touch.
+      #
+      # Mounted at the SAME path inside as outside, which is not fussiness. With
+      # SANDBOX_BACKEND=docker the backend asks the *host* daemon to start each
+      # sandbox with -v <cwd>:/workspace, and the host resolves that path in its
+      # own filesystem. If the two differ, Docker silently creates an empty
+      # directory and mounts that: pytest then reports "collected 0 items"
+      # rather than an error, and a run looks like a repository with no tests.
+      # Identical paths make the translation a no-op.
+      #
+      # This requires a Linux host, where REPOS_DIR is a real absolute path.
+      # On Docker Desktop for Windows or macOS the host path (D:\..., /Users/...)
+      # cannot exist inside a Linux container, so use SANDBOX_BACKEND=subprocess
+      # there.
+      - ${REPOS_DIR:-/srv/ai-softeng-repos}:${REPOS_DIR:-/srv/ai-softeng-repos}
+      # Lets the backend start sandbox containers on the host daemon. This is
+      # host-level access -- see deploy/backend.Dockerfile. Remove it and set
+      # SANDBOX_BACKEND=subprocess if that trade is not one you want.
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deploy/frontend.Dockerfile
+      args:
+        # Read by the browser, so this is the URL a user's machine can reach --
+        # not the compose service name, which only resolves inside the network.
+        NEXT_PUBLIC_API_BASE_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+        NEXT_PUBLIC_API_AUTH_TOKEN: ${API_AUTH_TOKEN:?set API_AUTH_TOKEN in deploy/.env}
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    restart: unless-stopped
+
+volumes:
+  ollama-models:
+  backend-data:

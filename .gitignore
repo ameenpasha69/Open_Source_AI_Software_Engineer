@@ -19,3 +19,7 @@ frontend/dist/
 .DS_Store
 
 .claude
+
+# Compose deployment: local secrets and the repositories the agent works on.
+deploy/.env
+deploy/repos/

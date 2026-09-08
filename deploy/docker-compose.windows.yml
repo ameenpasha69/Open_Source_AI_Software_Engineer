@@ -1,0 +1,37 @@
+# Override for Docker Desktop on Windows or macOS.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.windows.yml up -d
+#
+# The base file mounts the repositories at the same absolute path inside the
+# container as outside, so that the host daemon resolves a sandbox's bind mount
+# to the same place the backend meant. That only works on a Linux host: a
+# Windows path (D:\...) cannot exist inside a Linux container, and a macOS one
+# is not the path Docker's VM sees either.
+#
+# So here the repositories are mounted at a plain /repos and the sandbox backend
+# is switched to subprocess, which needs no path translation because it never
+# leaves the container.
+#
+# The trade is real and worth stating: with subprocess, an agent-authored
+# command runs inside the backend container rather than a throwaway one, so it
+# shares a filesystem with the database and the auth token. The container is
+# still a boundary against the host, but it is one boundary rather than two.
+# For a deployment that matters, use a Linux host and the base file.
+
+services:
+  backend:
+    environment:
+      SANDBOX_BACKEND: subprocess
+    # !override, not a plain list: Compose merges list-valued keys across files
+    # by appending, so without it the base file's identical-path repos mount
+    # survives alongside this one -- and a relative REPOS_DIR makes an invalid
+    # container target, which fails the whole service with "mount path must be
+    # absolute". Replacing the list outright is the intent here.
+    volumes: !override
+      - backend-data:/app/data
+      - ${REPOS_DIR:-./repos}:/repos
+      # No docker.sock: the subprocess backend does not start containers, and
+      # mounting it would hand over host-level access for nothing.
+
+volumes:
+  backend-data:
